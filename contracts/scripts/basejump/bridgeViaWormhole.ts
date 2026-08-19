@@ -5,7 +5,7 @@ import { isAddress, isHex } from "viem";
 import { args } from "@whm/common";
 import { ifs, wallet } from "@whm/common/evm";
 
-import basejumpJson from "../../out/Basejump.sol/Basejump.json";
+import emitterJson from "../../out/BasejumpEmitter.sol/BasejumpEmitter.json";
 
 const { requiredArg, requiredEnv } = args;
 const { getWallet } = wallet;
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
 
   const { publicClient, walletClient } = getWallet(rpcUrl, chainId, privateKey);
 
-  const { abi } = basejumpJson as ifs.ContractArtifact;
+  const { abi } = emitterJson as ifs.ContractArtifact;
 
   // Approve
   const erc20Abi = [
@@ -95,7 +95,7 @@ async function main(): Promise<void> {
     address,
     abi,
     functionName: "bridgeViaWormhole",
-    args: [asset, amount, recipient],
+    args: [asset, amount, recipient, "0x"],
     value: fee,
   });
 

@@ -18,8 +18,6 @@
     "migrate:oracle-relay-ethereum:fork": "bash sh/migrate-oracle-relay-ethereum.sh fork",
     "migrate:nintent-ethereum": "bash sh/migrate-nintent-ethereum.sh prod",
     "migrate:nintent-ethereum:fork": "bash sh/migrate-nintent-ethereum.sh fork",
-    "migrate:nintent-ethereum-alpha": "bash sh/migrate-nintent-ethereum-alpha.sh prod",
-    "migrate:nintent-ethereum-alpha:fork": "bash sh/migrate-nintent-ethereum-alpha.sh fork",
     "print:oracles": "bash sh/print-oracles.sh"
   },
   "dependencies": {

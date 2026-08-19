@@ -5,17 +5,23 @@ import type { MigrationConfig } from "./types";
 /**
  * Basejump, Base -> Hydration direct corridor. Both ends in one migration.
  *
- * Supersedes the MRL deployment (Base basejump 0xf5b9334e…529b + Moonbeam proxy +
- * XcmTransactor), whose definition this replaces. That stack stays on chain, owned by
- * its committees; it is disarmed separately with one Safe call, setLandingDest(0), which
- * reverts bridgeViaWormhole before any token is pulled. Its deployment record is kept as
- * deployments/prod/basejump-base-mrl.json.
+ * Two contracts, one per role: BasejumpEmitter on Base, BasejumpReceiver on Hydration.
+ * Neither carries the other's entrypoints — the corridor is inbound-only, so a shared base
+ * would have given each end four slots it never reads.
  *
- * Base steps (001-004) deploy FRESH — not an upgrade of the old proxy. That keeps every
- * wiring call on the deployer key, removes all storage-layout risk, and reduces the Safe's
- * involvement to the disarm plus accepting ownership in step 009.
+ * Supersedes two deployments, both left on chain and disarmed separately with
+ * setLandingDest(0) — which reverts bridgeViaWormhole before any token is pulled:
+ *   - the MRL stack (Base 0xf5b9334e…529b + Moonbeam proxy + XcmTransactor), committee-owned,
+ *     one Safe call. Record: deployments/archive/basejump-base.json
+ *   - the first direct NTT source (0x9c007310…c4d2), deployer-owned. Record:
+ *     deployments/archive/basejump-base-ntt.json. Replaced rather than upgraded because
+ *     dropping its unused tokenBridge slot would shift every slot after it.
  *
- * Hydration steps (005-008) deploy the receiver and wire it to the source deployed in 001,
+ * Base steps (001-004) deploy FRESH. That keeps every wiring call on the deployer key,
+ * removes all storage-layout risk, and reduces the Safe's involvement to the disarm plus
+ * accepting ownership in step 009.
+ *
+ * Hydration steps (005-008) deploy the receiver and wire it to the emitter deployed in 001,
  * read straight from ctx.outputs — no env-copied address, so the two ends cannot diverge.
  *
  * REUSES the existing landing 0x70e9b12c…df976 — it already holds the EURC pool, is already
@@ -24,8 +30,8 @@ import type { MigrationConfig } from "./types";
  * see docs/basejump/direct-hydration.md. That call is the go-live switch; until it lands the
  * corridor stays dark and this migration is safe to run in full.
  *
- * Inbound only. The source never gets setAuthorizedEmitter/setLanding, and the receiver has
- * no outbound path at all. Hydration -> Base is out of scope.
+ * Inbound only, by code rather than by configuration: the emitter declares no receive path
+ * and the receiver no send path. Hydration -> Base is out of scope.
  *
  * Required PK env vars:
  *   PK           — Base deployer

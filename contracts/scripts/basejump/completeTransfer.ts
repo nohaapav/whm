@@ -5,7 +5,7 @@ import { isAddress } from "viem";
 import { args } from "@whm/common";
 import { ifs, wallet } from "@whm/common/evm";
 
-import basejumpJson from "../../out/Basejump.sol/Basejump.json";
+import receiverJson from "../../out/BasejumpReceiver.sol/BasejumpReceiver.json";
 
 const { requiredArg, requiredEnv } = args;
 const { getWallet } = wallet;
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
 
   const { publicClient, walletClient } = getWallet(rpcUrl, chainId, privateKey);
 
-  const { abi } = basejumpJson as ifs.ContractArtifact;
+  const { abi } = receiverJson as ifs.ContractArtifact;
 
   const txHash = await walletClient.writeContract({
     address,
