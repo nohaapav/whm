@@ -3,64 +3,41 @@ pragma solidity ^0.8.22;
 
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {ITokenBridge} from "wormhole-solidity-sdk/interfaces/ITokenBridge.sol";
 import {IWormhole} from "wormhole-solidity-sdk/interfaces/IWormhole.sol";
+
+import {IWormholeTransceiver} from "../ntt/interfaces/IWormholeTransceiver.sol";
+import {NttPayload} from "../ntt/NttPayload.sol";
+
+import {HydrationConsts} from "../utils/hydration/HydrationConsts.sol";
 
 import {IIntentReceiver} from "./interfaces/IIntentReceiver.sol";
 
-/// @dev Minimal canonical wrapped-native interface (WETH9 pattern — WETH, WGLMR, WMATIC, …).
-interface IWETH {
-    function withdraw(uint256 amount) external;
-}
-
-/// @title IntentReceiver — Ethereum redeemer for the direct TokenBridge (payload-3) intent path
-/// @notice Replaces the Basejump fast-path + landing pool for the Moonbeam→Ethereum direction:
-///         Moonbeam finalizes in ~seconds, so fronting liquidity from a pre-funded pool to beat
-///         slow source finality buys nothing here. Instead the source bridges WETH straight through
-///         the Wormhole TokenBridge with a payload (`transferTokensWithPayload`); a relayer calls
-///         `redeem(vaa, feeRequested)` on this contract, which pulls the released WETH, unwraps it to
-///         native ETH, reimburses the relayer, and forwards the rest to the OneClick `depositAddress`.
+/// @title IntentReceiver — Ethereum end of the NTT intent path
+/// @notice One call carries an order the last hop it takes on our side:
 ///
-///         Holds no liquidity in the happy path. Redemption is permissionless — the payload, not the
-///         caller, dictates the destination, and the TokenBridge restricts `completeTransferWithPayload`
-///         to the encoded recipient (this contract) and marks the VAA consumed (replay-safe). If the
-///         forward fails the whole call reverts, leaving the VAA redeemable for retry; `sweep` exists
-///         for operator recovery of stray funds.
+///           1. MATCH   — the settlement and the emitter's instruction must name the same sequence.
+///           2. DELIVER — submit the NTT VAA, releasing native ETH here.
+///           3. FORWARD — pay the caller its fee, send the rest to the instruction's depositAddress.
 ///
-///         The unwrap path is taken only when the delivered token equals the configured
-///         `wrappedNative`; any other token is forwarded as the delivered ERC20, so a token-identity
-///         mismatch degrades to an ERC20 forward instead of bricking.
+///         Atomic, so whoever calls it did all of it and is the one paid. NTT's delivery is
+///         permissionless unlike the TokenBridge's payload-3 completion, so a settlement may already
+///         be here; that skips step 2 rather than failing.
 ///
-///         The relay fee is charged here on the destination side (native in, native out — no FX):
-///         the caller names `feeRequested`, bounded by the `maxRelayFee` ceiling in the payload, and
-///         is paid in the delivered asset.
+/// @dev Nothing is caller-supplied. The amount, the destination and the fee ceiling all come from a
+///      guardian-signed instruction whose emitter is pinned, and the amount must actually have
+///      landed here before any of it moves.
 contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
-    using SafeERC20 for IERC20;
-
-    /// @notice Sentinel `asset` value for native ETH.
-    address public constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
-
-    /// @notice Window after a VAA is issued during which only authorized relayers may redeem it (when
-    ///         an allowlist is set). Once it elapses, redemption is public again (liveness fallback).
-    uint256 internal constant EXCLUSIVE_WINDOW = 5 minutes;
+    using NttPayload for bytes;
 
     address public owner;
-    ITokenBridge public tokenBridge;
+    IWormhole public wormhole;
+    IWormholeTransceiver public transceiver;
 
-    /// @notice Wrapped-native token (e.g. WETH) unwrapped to native ETH on delivery. A delivered
-    ///         token equal to this is unwrapped to native; any other delivered token is forwarded as-is.
-    address public wrappedNative;
+    /// @notice The Hydration IntentEmitter, as a Wormhole universal address.
+    bytes32 public emitterAddress;
 
-    /// @notice Relayers with exclusive right to redeem during EXCLUSIVE_WINDOW after a VAA is issued.
-    ///         Permissionless by default: while the allowlist is empty (`authorizedRelayerCount == 0`)
-    ///         anyone may redeem at any time. Once any relayer is authorized, only authorized callers may
-    ///         redeem until the window elapses; after that redemption is public again (liveness fallback).
-    ///         `maxRelayFee` (user-signed) caps the fee throughout.
-    mapping(address => bool) public authorizedRelayer;
-    uint256 public authorizedRelayerCount;
+    mapping(bytes32 => bool) public processed;
 
     modifier onlyOwner() {
         _onlyOwner();
@@ -75,86 +52,85 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
         _disableInitializers();
     }
 
-    function initialize(address _tokenBridge, address _wrappedNative) public initializer {
+    function initialize(address _wormhole, address _transceiver) public initializer {
         owner = msg.sender;
-        tokenBridge = ITokenBridge(_tokenBridge);
-        wrappedNative = _wrappedNative;
+        wormhole = IWormhole(_wormhole);
+        transceiver = IWormholeTransceiver(_transceiver);
     }
 
-    /// @notice Accept native ETH.
+    /// @notice Accept settlements.
     receive() external payable {}
 
     // ─── Core ────────────────────────────────────────────────────
 
-    function redeem(bytes calldata vaa, uint256 feeRequested) external {
-        // Freshness guard BEFORE the expensive completeTransferWithPayload (which verifies every
-        // guardian signature, then reverts if the VAA was already consumed).
-        IWormhole.VM memory parsed = tokenBridge.wormhole().parseVM(vaa);
-        if (tokenBridge.isTransferCompleted(parsed.hash)) revert AlreadyRedeemed();
+    /// @inheritdoc IIntentReceiver
+    function processOrder(bytes calldata nttVaa, bytes calldata instructionVaa, uint256 feeRequested)
+        external
+    {
+        if (emitterAddress == bytes32(0)) revert NotConfigured();
 
-        // Redeem — TokenBridge releases the token to this contract and returns the transfer body.
-        ITokenBridge.TransferWithPayload memory t =
-            tokenBridge.parseTransferWithPayload(tokenBridge.completeTransferWithPayload(vaa));
+        (uint64 sequence, address depositAddress, uint256 amount, uint256 maxRelayFee) =
+            _instruction(instructionVaa);
 
-        // The ERC20 actually released on this chain (canonical token if home-chain, else wrapped form).
-        address delivered = t.tokenChain == tokenBridge.chainId()
-            ? _bytes32ToAddress(t.tokenAddress)
-            : tokenBridge.wrappedAsset(t.tokenChain, t.tokenAddress);
+        IWormhole.VM memory settlement = wormhole.parseVM(nttVaa);
+        uint64 settled = settlement.payload.sequenceOf();
+        if (settled != sequence) revert SequenceMismatch(sequence, settled);
 
-        // This contract holds no liquidity between redeems (forwards 100%, reverts on failure), so its
-        // balance of the delivered token IS what this VAA just released.
-        uint256 amount = IERC20(delivered).balanceOf(address(this));
-        if (amount == 0) revert NothingDelivered();
+        if (feeRequested > maxRelayFee) revert FeeExceedsCeiling();
 
-        if (t.payload.length != 96) revert MalformedPayload();
-        (bytes32 intentId, address depositAddress, uint256 maxRelayFee) =
-            abi.decode(t.payload, (bytes32, address, uint256));
-        if (depositAddress == address(0)) revert MalformedPayload();
-
-        // Exclusive window: once an allowlist is set, only authorized relayers may redeem until
-        // EXCLUSIVE_WINDOW has elapsed since the VAA was issued; after that anyone may (public
-        // fallback). While the allowlist is empty, redemption is permissionless at any time.
-        if (authorizedRelayerCount > 0 && !authorizedRelayer[msg.sender]) {
-            if (block.timestamp < parsed.timestamp + EXCLUSIVE_WINDOW) revert Unauthorized();
+        // Skipped when a generic NTT relayer already delivered.
+        if (!transceiver.isVAAConsumed(settlement.hash)) {
+            transceiver.receiveMessage(nttVaa);
         }
 
-        // Fee bounded by the user-signed ceiling; the rest goes to depositAddress. `amount - feeRequested`
-        // underflow-reverts if the fee ever exceeds the delivery.
-        if (feeRequested > maxRelayFee) revert FeeExceedsCeiling();
+        if (address(this).balance < amount) revert NotFunded(amount, address(this).balance);
+
         uint256 forwardAmount = amount - feeRequested;
 
-        // Settle in the delivered asset: unwrap the wrapped-native to ETH, else pay the ERC20 as-is.
-        address asset;
-        if (delivered == wrappedNative) {
-            IWETH(wrappedNative).withdraw(amount);
-            asset = NATIVE;
-        } else {
-            asset = delivered;
-        }
-
-        _pay(asset, depositAddress, forwardAmount);
-        emit IntentForwarded(intentId, asset, depositAddress, forwardAmount);
+        _pay(depositAddress, forwardAmount);
+        emit OrderProcessed(sequence, depositAddress, forwardAmount);
 
         if (feeRequested > 0) {
-            _pay(asset, msg.sender, feeRequested);
-            emit RelayFeePaid(intentId, msg.sender, feeRequested);
+            _pay(msg.sender, feeRequested);
+            emit RelayFeePaid(sequence, msg.sender, feeRequested);
         }
     }
 
     // ─── Helpers ─────────────────────────────────────────────────
 
-    function _bytes32ToAddress(bytes32 b) internal pure returns (address) {
-        return address(uint160(uint256(b)));
+    /// @dev Verify the emitter's instruction, consume it, and read its terms.
+    /// @return sequence The settlement this instruction was published with
+    /// @return depositAddress Where it forwards
+    /// @return amount What the settlement delivers — NTT trims to the precision the emitter already
+    ///         quantized to, so the delivery equals this exactly
+    /// @return maxRelayFee Ceiling on the caller's claim
+    function _instruction(bytes calldata instructionVaa)
+        internal
+        returns (uint64 sequence, address depositAddress, uint256 amount, uint256 maxRelayFee)
+    {
+        (IWormhole.VM memory vm, bool valid,) = wormhole.parseAndVerifyVM(instructionVaa);
+
+        if (!valid) revert InvalidInstruction();
+
+        if (
+            vm.emitterChainId != HydrationConsts.WORMHOLE_CHAIN_ID ||
+            vm.emitterAddress != emitterAddress
+        ) {
+            revert UnauthorizedEmitter(vm.emitterChainId, vm.emitterAddress);
+        }
+
+        if (processed[vm.hash]) revert AlreadyRedeemed();
+        processed[vm.hash] = true;
+
+        (sequence, depositAddress, amount, maxRelayFee) =
+            abi.decode(vm.payload, (uint64, address, uint256, uint256));
+        if (depositAddress == address(0)) revert MalformedInstruction();
     }
 
-    /// @dev Pay `to` in `asset`: native ETH for the NATIVE sentinel, else an ERC20 transfer.
-    function _pay(address asset, address to, uint256 amount) private {
-        if (asset == NATIVE) {
-            (bool ok,) = to.call{value: amount}("");
-            if (!ok) revert NativeTransferFailed();
-        } else {
-            IERC20(asset).safeTransfer(to, amount);
-        }
+    /// @dev Everything this contract moves is native ETH.
+    function _pay(address to, uint256 amount) private {
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert NativeTransferFailed();
     }
 
     // ─── Upgrade ─────────────────────────────────────────────────
@@ -167,21 +143,15 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
         owner = newOwner;
     }
 
-    function setWrappedNative(address _wrappedNative) external onlyOwner {
-        emit WrappedNativeUpdated(wrappedNative, _wrappedNative);
-        wrappedNative = _wrappedNative;
+    /// @notice Pin the emitter the instructions must come from.
+    function setEmitter(bytes32 emitter) external onlyOwner {
+        emitterAddress = emitter;
+        emit EmitterUpdated(emitter);
     }
 
-    function setAuthorizedRelayer(address relayer, bool enabled) external onlyOwner {
-        if (authorizedRelayer[relayer] == enabled) return;
-        authorizedRelayer[relayer] = enabled;
-        enabled ? authorizedRelayerCount++ : authorizedRelayerCount--;
-        emit RelayerAuthorized(relayer, enabled);
-    }
-
-    /// @notice Emergency withdrawal of assets.
-    function sweep(address asset, address to, uint256 amount) external onlyOwner {
-        _pay(asset, to, amount);
-        emit Swept(asset, to, amount);
+    /// @notice Emergency withdrawal.
+    function sweep(address to, uint256 amount) external onlyOwner {
+        _pay(to, amount);
+        emit Swept(to, amount);
     }
 }

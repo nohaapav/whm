@@ -11,4 +11,4 @@ COPY package.json .
 COPY package-lock.json .
 RUN npm install --production
 ENTRYPOINT [ "npm", "run" ]
-CMD [ "start" ]
+CMD [ "start:hydration" ]

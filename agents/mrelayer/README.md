@@ -4,20 +4,6 @@ Wormhole VAA relayer for cross-chain token transfers.
 
 ## Relayers
 
-### Mrl Relayer (default)
-
-Relays token transfers **to Moonbeam** from ETH, Base, Acala, Solana, and SUI using GMP precompile.
-Also runs the Basejump fast-path watchers (Base + Ethereum → the corridor's `BasejumpProxy.completeTransfer`)
-and the Solana oracle relay.
-
-### Base Relayer
-
-Relays token transfers **from Moonbeam to Base** using standard Wormhole Token Bridge.
-
-### Ethereum Relayer
-
-Relays token transfers **from Moonbeam to Ethereum** using standard Wormhole Token Bridge.
-
 ### Hydration NTT Relayer (`start:hydration`)
 
 Redeems Wormhole NTT transfers **to Hydration** from Ethereum, Base, Solana, and Sui. It watches
@@ -26,11 +12,16 @@ Hydration transceiver.
 
 ### Intent Relayer (`start:intent`)
 
-Relays the WTT intent path **from Moonbeam to Ethereum** — payload-3 transfers addressed to the
-`IntentReceiver`. Completes via `IntentReceiver.redeem(vaa, feeRequested)` (the payload-3 recipient
-restriction means the bare TokenBridge can't), pricing `feeRequested` from the [quoter](../quoter/)
-service and skipping when it exceeds the payload's `maxRelayFee`. Uses its own **reimbursed** wallet
-(`INTENT_PRIVKEY`), separate from the generic relayers.
+Relays the intents v2 path **from Hydration to Ethereum**. Hydration settles WETH over NTT and
+publishes a forwarding instruction beside it; this relayer pairs the two and calls
+`IntentReceiver.processOrder(nttVaa, instructionVaa, feeRequested)`, which delivers the settlement,
+forwards it to the instruction's `depositAddress`, and reimburses the caller. `feeRequested` is
+priced by the [quoter](../quoter/) service and retried with backoff while it exceeds the order's
+`maxRelayFee`. Uses its own **reimbursed** wallet (`INTENT_PRIVKEY`), separate from the generic
+relayers.
+
+Only the settlement is subscribed to — the instruction is derived from the source transaction on
+demand, so there is no pairing state to lose across restarts.
 
 ## Environment Variables
 
@@ -46,44 +37,6 @@ service and skipping when it exceeds the payload's `maxRelayFee`. Uses its own *
 | `GAS_WARN_MULTIPLIER` | Low-gas warning threshold (× min gas)                              | `50`             |
 | `DISCORD_WEBHOOK_URL` | Low-gas / out-of-gas alerts                                        | optional         |
 
-### Mrl relayer — `start` (inbound to Hydration)
-
-| Variable                 | Description                                       | Default                              |
-| ------------------------ | ------------------------------------------------- | ------------------------------------ |
-| `MOONBEAM_RPC`           | Moonbeam RPC endpoint                             | `https://moonbeam-rpc.n.dwellir.com` |
-| `ETH_FROM_SEQ`           | Start sequence for ETH VAAs                       | `499562`                             |
-| `BASE_FROM_SEQ`          | Start sequence for Base VAAs                      | `244981`                             |
-| `ACA_FROM_SEQ`           | Start sequence for Acala VAAs                     | `3358`                               |
-| `SOLANA_FROM_SEQ`        | Start sequence for Solana token VAAs              | `1211243`                            |
-| `SUI_FROM_SEQ`           | Start sequence for SUI VAAs                       | `217370`                             |
-| `BASEJUMP_BASE_FROM_SEQ` | Start sequence for Basejump (Base) fast-path VAAs | `0`                                  |
-| `BASEJUMP_ETH_FROM_SEQ`  | Start sequence for Basejump (Ethereum) fast-path VAAs | `0`                              |
-| `ORACLE_SOLANA_FROM_SEQ` | Start sequence for Solana oracle VAAs             | `0`                                  |
-
-### Base relayer — `start:base` (Moonbeam → Base)
-
-| Variable            | Description                      | Default                    |
-| ------------------- | -------------------------------- | -------------------------- |
-| `BASE_RPC`          | Base RPC endpoint                | `https://mainnet.base.org` |
-| `MOONBEAM_FROM_SEQ` | Start sequence for Moonbeam VAAs | `0`                        |
-
-### Eth relayer — `start:eth` (Moonbeam → Ethereum)
-
-| Variable            | Description                      | Default                    |
-| ------------------- | -------------------------------- | -------------------------- |
-| `ETH_RPC`           | Ethereum RPC endpoint            | `https://eth.llamarpc.com` |
-| `MOONBEAM_FROM_SEQ` | Start sequence for Moonbeam VAAs | `95495`                    |
-
-### Intent relayer — `start:intent` (Moonbeam → Ethereum, reimbursed)
-
-| Variable            | Description                                         | Default                    |
-| ------------------- | --------------------------------------------------- | -------------------------- |
-| `INTENT_PRIVKEY`    | Reimbursed signing wallet (separate from `PRIVKEY`) | Required                   |
-| `INTENT_RECEIVER`   | IntentReceiver proxy address on Ethereum            | Required                   |
-| `QUOTER_URL`        | quoter service base URL                             | `http://localhost:8080`    |
-| `ETH_RPC`           | Ethereum RPC endpoint                               | `https://eth.llamarpc.com` |
-| `MOONBEAM_FROM_SEQ` | Start sequence for Moonbeam VAAs                    | `0`                        |
-
 ### Hydration NTT relayer — `start:hydration` (NTT origins → Hydration)
 
 | Variable              | Description                                 | Default                               |
@@ -94,21 +47,35 @@ service and skipping when it exceeds the payload's `maxRelayFee`. Uses its own *
 | `NTT_SOLANA_FROM_SEQ` | Start sequence for Solana NTT VAAs          | `0`                                   |
 | `NTT_SUI_FROM_SEQ`    | Start sequence for Sui NTT VAAs             | `0`                                   |
 
+### Intent relayer — `start:intent` (Hydration → Ethereum, reimbursed)
+
+| Variable                   | Description                                          | Default                               |
+| -------------------------- | ---------------------------------------------------- | ------------------------------------- |
+| `INTENT_PRIVKEY`           | Reimbursed signing wallet (separate from `PRIVKEY`)  | Required                              |
+| `NTT_TRANSCEIVER`          | WormholeTransceiver (WETH) on Hydration — subscribed | Required                              |
+| `INTENT_EMITTER`           | IntentEmitter on Hydration — publishes instructions  | Required                              |
+| `INTENT_RECEIVER`          | IntentReceiver proxy on Ethereum                     | Required                              |
+| `QUOTER_URL`               | quoter service base URL                              | `http://localhost:8080`               |
+| `ETH_RPC`                  | Ethereum RPC endpoint                                | `https://eth.llamarpc.com`            |
+| `HYDRATION_RPC`            | Hydration EVM RPC (reads the source tx receipt)      | `https://hydration-rpc.n.dwellir.com` |
+| `HYDRATION_FROM_SEQ`       | Start sequence for Hydration VAAs                    | `0`                                   |
+| `INTENT_GAS_LIMIT`         | Gas limit quoted for `processOrder`                   | `500000`                              |
+| `INTENT_RETRIES`           | Max attempts per settlement                          | `8`                                   |
+| `INTENT_RETRY_BASE_MS`     | Backoff base — `min(2^n · base, max)`                | `60000`                               |
+| `INTENT_RETRY_MAX_MS`      | Backoff ceiling                                      | `4200000`                             |
+| `INTENT_MAX_VAA_AGE_MS`    | Drop a settlement once its VAA is older than this    | `3600000`                             |
+
 ## Development
 
 ```bash
 # Install dependencies
 npm install
 
-# Run Moonbeam relayer (dev)
-npm run dev
-
-# Run Base relayer (dev)
-npm run dev:base
-
 # Run Hydration NTT relayer (dev)
 npm run dev:hydration
 
+# Run intent relayer (dev)
+npm run dev:intent
 
 # Start Redis locally
 npm run redis
@@ -123,14 +90,11 @@ npm run mainnet-spy
 # Build
 npm run build
 
-# Run Moonbeam relayer
-npm run start
-
-# Run Base relayer
-npm run start:base
-
 # Run Hydration NTT relayer
 npm run start:hydration
+
+# Run intent relayer
+npm run start:intent
 ```
 
 ## Docker
@@ -139,31 +103,34 @@ npm run start:hydration
 # Build image
 docker build -t mrelayer .
 
-# Run Moonbeam relayer (default)
-docker run -e PRIVKEY=<key> mrelayer
+# Run Hydration NTT relayer (default)
+docker run -e PRIVKEY=<key> -e HYDRATION_RPC=<rpc> mrelayer
 
-# Run Base relayer
-docker run -e PRIVKEY=<key> -e BASE_RPC=<rpc> mrelayer start:base
-
-# Run Hydration NTT relayer
-docker run -e PRIVKEY=<key> -e HYDRATION_RPC=<rpc> mrelayer start:hydration
+# Run intent relayer
+docker run -e INTENT_PRIVKEY=<key> -e NTT_TRANSCEIVER=<addr> -e INTENT_EMITTER=<addr> \
+  -e INTENT_RECEIVER=<addr> mrelayer start:intent
 ```
 
 ## Docker Stack
 
 ```bash
-# Deploy Moonbeam relayer stack
 docker stack deploy -c stack.yml mrelayer
 ```
 
-For Base relayer, override the command in your stack config:
+`stack.yml` runs both relayers plus Redis and a mainnet Spy. Fill the `FILL THIS …` placeholders
+before deploying.
 
-```yaml
-services:
-  app:
-    image: mrelayer
-    command: ["start:base"]
-    environment:
-      BASE_RPC: "https://mainnet.base.org"
-      # ...
-```
+## Notes
+
+### Chain 73 and the engine's SDK
+
+`@wormhole-foundation/relayer-engine` depends on `@certusone/wormhole-sdk`, which predates Hydration
+and does not know chain 73. `app.chain(73).address(…)` therefore throws `Unrecognized wormhole
+chainId 73` from the engine's `encodeEmitterAddress`. The intent relayer registers its handler under
+the pre-encoded emitter key instead (see `onEmitter` in `src/app-intent.ts`) — for an EVM chain that
+encoding is just the address left-padded to 32 bytes. Everything else in the engine degrades
+gracefully on an unrecognised chain id: the TokenBridge middleware skips, providers are never built
+for it, and only a missed-VAA metrics label reads `undefined`.
+
+One consequence worth knowing: the engine only prefixes `0x` onto a `sourceTxHash` for chains its SDK
+recognises as EVM, so chain-73 hashes arrive bare and the handler prefixes them itself.

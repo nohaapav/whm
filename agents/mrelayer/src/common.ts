@@ -17,12 +17,23 @@ if (process.env.WORMHOLE_API_KEY) {
   };
 }
 
+/**
+ * Load a signed VAA from the Wormholescan REST API.
+ *
+ * An independent path to `ctx.fetchVaa`, which reaches the guardians over gRPC — either can be down
+ * or lagging while the other serves, so this doubles as a fallback.
+ *
+ * @param emitterChain Wormhole chain id of the emitter.
+ * @param emitterAddr  Emitter address, 32-byte hex without `0x`.
+ * @param sequence     The emitter's Wormhole sequence.
+ * @returns The signed VAA bytes plus the source transaction hash and timestamp.
+ */
 export async function loadVaaFromWormholeApi(
   emitterChain: number,
   emitterAddr: string,
-  sequence: number,
+  sequence: number | bigint,
 ) {
-  const url = `https://api.wormholescan.io/api/v1/vaas/${emitterChain}/${emitterAddr}/${sequence}?parsedPayload=true`;
+  const url = `https://api.wormholescan.io/api/v1/vaas/${emitterChain}/${emitterAddr}/${sequence}`;
 
   try {
     const response = await fetch(url);
@@ -33,36 +44,13 @@ export async function loadVaaFromWormholeApi(
     }
 
     const { data } = apiData;
-    const { payload } = data;
-
-    const vaaBytes = Buffer.from(data.vaa, "base64");
-    const to = payload.toAddress.replace("0x", "").toLowerCase();
-    const toChain = payload.toChain;
-    const payloadType = payload.payloadType;
-    const amount = payload.amount;
-    const fromAddress = payload.fromAddress;
-    const tokenAddress = payload.tokenAddress;
-    const tokenChain = payload.tokenChain;
-
-    const tokenBridgePayload = {
-      payloadType,
-      toChain,
-      to: Buffer.from(to, "hex"),
-      tokenTransferPayload: {
-        amount: BigInt(amount),
-        fromAddress,
-        tokenAddress,
-        tokenChain,
-      },
-    };
 
     return {
-      payload: tokenBridgePayload,
+      vaaBytes: Buffer.from(data.vaa, "base64"),
       sourceTxHash: data.txHash,
       timestamp: data.timestamp,
       emitterChain: data.emitterChain,
       sequence: data.sequence,
-      vaaBytes,
     };
   } catch (error) {
     logger.error(`Failed to load VAA from Wormhole API: ${error.message}`);
@@ -70,33 +58,11 @@ export async function loadVaaFromWormholeApi(
   }
 }
 
-export async function getPayloadWithFallback(ctx: any, ctxLogger: any) {
-  const { vaa } = ctx;
-  let { payload } = ctx.tokenBridge;
-
-  if (!payload) {
-    ctxLogger.info("Payload missing, attempting to load from Wormhole API...");
-
-    const emitterChain = vaa.emitterChain;
-    const emitterAddr = vaa.emitterAddress.toString("hex");
-    const sequence = vaa.sequence;
-
-    ctxLogger.info(`Loading VAA ${emitterChain}/${emitterAddr}/${sequence} from API`);
-
-    const apiVaaData = await loadVaaFromWormholeApi(emitterChain, emitterAddr, Number(sequence));
-    payload = apiVaaData.payload;
-
-    ctxLogger.info("Successfully loaded payload from Wormhole API");
-    ctxLogger.debug("API payload", payload);
-  }
-
-  return payload;
-}
-
 export type TransferTask = {
   vaa: any;
-  type?: "mrl" | "insta" | "insta-eth" | "oracle" | "intent";
-  payloadType?: number;
+  type?: "intent";
+  /// Signed instruction VAA paired with `vaa`, for receivers that take both legs in one call.
+  instructionVaa?: Buffer;
   feeRequested?: string;
   logger: any;
   next: () => void;

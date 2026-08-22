@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { isAddress, isHex, keccak256, encodePacked } from "viem";
+import { isAddress, parseEventLogs, formatEther } from "viem";
 
 import { args } from "@whm/common";
 import { ifs, wallet } from "@whm/common/evm";
@@ -10,7 +10,7 @@ import intentEmitterJson from "../../out/IntentEmitter.sol/IntentEmitter.json";
 const { requiredArg, optionalArg, requiredEnv } = args;
 const { getWallet } = wallet;
 
-// Hydration asset id → ERC20-precompile address: 0x0100000000 | assetId.
+// Hydration asset id → ERC20-precompile address: 0x0100000000 | assetId (HydrationConsts.toErc20).
 function assetErc20(assetId: number): `0x${string}` {
   const v = (1n << 32n) + BigInt(assetId);
   return ("0x" + v.toString(16).padStart(40, "0")) as `0x${string}`;
@@ -23,22 +23,15 @@ function getConfig() {
   const privateKey = requiredArg("--pk");
   const address = requiredArg("--address"); // IntentEmitter proxy
   const assetIn = Number(requiredArg("--assetIn")); // Hydration asset id (e.g. DOT=5)
-  const amountIn = BigInt(requiredArg("--amountIn")); // total A pulled from caller
-  const minEthOut = BigInt(requiredArg("--minEthOut")); // slippage floor on WETH out
-  const maxFeeIn = BigInt(requiredArg("--maxFeeIn")); // max A spent buying the GLMR fee
-  const depositAddress = requiredArg("--depositAddress"); // OneClick deposit addr (Ethereum)
-  const maxRelayFee = BigInt(optionalArg("--maxRelayFee") ?? "0"); // dest relay-fee ceiling (Wtt only; 0 for Bjp)
-  const intentIdArg = optionalArg("--intentId");
+  const amountIn = BigInt(requiredArg("--amountIn")); // A pulled from the caller
+  const minEthOut = BigInt(requiredArg("--minEthOut")); // floor on what ARRIVES, not on the swap
+  const depositAddress = requiredArg("--depositAddress"); // Ethereum recipient
+  const maxRelayFee = BigInt(optionalArg("--maxRelayFee") ?? "0");
 
   if (!isAddress(address)) throw new Error("Invalid --address (IntentEmitter).");
   if (!isAddress(depositAddress)) throw new Error("Invalid --depositAddress.");
   if (!Number.isInteger(assetIn) || assetIn < 0) throw new Error("Invalid --assetIn (asset id).");
-  if (intentIdArg && (!isHex(intentIdArg) || intentIdArg.length !== 66))
-    throw new Error("Invalid --intentId (expected bytes32).");
-
-  const intentId =
-    (intentIdArg as `0x${string}`) ??
-    keccak256(encodePacked(["address", "uint256"], [depositAddress as `0x${string}`, amountIn]));
+  if (amountIn === 0n) throw new Error("--amountIn must be > 0.");
 
   return {
     rpcUrl,
@@ -48,10 +41,8 @@ function getConfig() {
     assetIn,
     amountIn,
     minEthOut,
-    maxFeeIn,
     depositAddress: depositAddress as `0x${string}`,
     maxRelayFee,
-    intentId,
   };
 }
 
@@ -88,7 +79,20 @@ async function main(): Promise<void> {
   console.log("amountIn:     ", cfg.amountIn.toString());
   console.log("minEthOut:    ", cfg.minEthOut.toString());
   console.log("depositAddr:  ", cfg.depositAddress);
-  console.log("intentId:     ", cfg.intentId);
+  console.log("maxRelayFee:  ", cfg.maxRelayFee.toString());
+
+  // Not payable: the rail's delivery price and the message fee come out of the swap output, which
+  // works because Hydration's native currency IS WETH — the ERC20 the swap produces is the same
+  // balance the emitter spends as msg.value.
+  const [nttManager, intentReceiver] = (await Promise.all([
+    publicClient.readContract({ address: cfg.address, abi, functionName: "nttManager" }),
+    publicClient.readContract({ address: cfg.address, abi, functionName: "intentReceiver" }),
+  ])) as [`0x${string}`, `0x${string}`];
+  console.log("nttManager:   ", nttManager);
+  console.log("intentRcvr:   ", intentReceiver);
+  if (BigInt(nttManager) === 0n || BigInt(intentReceiver) === 0n) {
+    throw new Error("NotConfigured — set nttManager and intentReceiver first.");
+  }
 
   const bal = (await publicClient.readContract({
     address: assetToken,
@@ -96,10 +100,9 @@ async function main(): Promise<void> {
     functionName: "balanceOf",
     args: [account.address],
   })) as bigint;
-  console.log("assetIn balance:", bal.toString());
+  console.log("assetIn bal:  ", bal.toString());
   if (bal < cfg.amountIn) throw new Error(`Insufficient assetIn: have ${bal}, need ${cfg.amountIn}`);
 
-  // 1. Approve the emitter to pull amountIn of assetIn.
   const approveHash = await walletClient.writeContract({
     address: assetToken,
     abi: erc20Abi,
@@ -109,19 +112,37 @@ async function main(): Promise<void> {
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
   console.log("approved:", approveHash);
 
-  // 2. swapAndBridge(assetIn, amountIn, minEthOut, maxFeeIn, intentId, depositAddress, maxRelayFee)
   const hash = await walletClient.writeContract({
     address: cfg.address,
     abi,
-    functionName: "swapAndBridge",
-    args: [cfg.assetIn, cfg.amountIn, cfg.minEthOut, cfg.maxFeeIn, cfg.intentId, cfg.depositAddress, cfg.maxRelayFee],
+    functionName: "placeOrder",
+    args: [
+      cfg.assetIn,
+      cfg.amountIn,
+      cfg.minEthOut,
+      cfg.depositAddress,
+      cfg.maxRelayFee,
+    ],
   });
-  console.log("swapAndBridge tx:", hash);
+  console.log("placeOrder tx:", hash);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   console.log("status:", receipt.status, "block:", receipt.blockNumber);
+
+  const placed = parseEventLogs({ abi, eventName: "OrderPlaced", logs: receipt.logs })[0];
+  if (!placed) throw new Error("placeOrder succeeded but no OrderPlaced event — investigate.");
+  const { transferSequence, ethOut } = placed.args as {
+    transferSequence: bigint;
+    ethOut: bigint;
+  };
+  console.log(
+    `OrderPlaced transferSequence=${transferSequence} ethOut=${ethOut} (${formatEther(ethOut)} ETH)`,
+  );
+  // The NTT manager's sequence, not a Wormhole one — it is what the receiver matches the settlement
+  // and its forwarding instruction on.
+  console.log(`match the settlement on manager sequence ${transferSequence}`);
 }
 
-main().catch((e) => {
-  console.error(e);
+main().catch((error) => {
+  console.error(error);
   process.exit(1);
 });

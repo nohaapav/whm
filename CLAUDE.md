@@ -12,7 +12,7 @@ It lists available reference documents and their raw GitHub URLs.
 Cross-chain messaging infrastructure connecting EVM chains, Solana, and Hydration via Moonbeam. Three concerns:
 
 1. **On-chain contracts** — upgradeable Solidity (Foundry) on Base/Moonbeam/Hydration/Ethereum + an Anchor program on Solana.
-2. **Off-chain agents** — long-running TS services that publish/index/relay (`broadcaster`, `bjscan`, `mrelayer`).
+2. **Off-chain agents** — long-running TS services that publish/index/relay (`broadcaster`, `scan`, `mrelayer`).
 3. **Shared tooling** — a crash-safe migration runner, shared chain/wallet/args utilities, and the `migrations/` top-level orchestration.
 
 **Repo:** `galacticcouncil/whm`
@@ -45,7 +45,7 @@ pnpm --filter @whm/crates-solana test     # cargo test -p oracle-emitter
 pnpm --filter @whm/crates-solana logs:local
 
 # Agents (esbuild)
-cd agents/<broadcaster|bjscan>
+cd agents/<broadcaster|scan>
 pnpm dev                                  # watch mode
 pnpm build                                # dist/index.js
 pnpm start
@@ -79,7 +79,7 @@ Full migration model + conventions: [migrations/README.md](migrations/README.md)
 ```
 agents/
   broadcaster/            # @whm/broadcaster — Solana → Wormhole price/rate publisher
-  bjscan/                 # @whm/bjscan — Basejump indexer
+  scan/                   # @whm/scan — multi-feature indexer (basejump, intents)
   nintent/                # @whm/nintent — intent deposit notifier (IntentForwarded → 1Click)
   quoter/                 # @whm/quoter — relay-fee quoter service
   mrelayer/               # @whm/mrelayer — Wormhole VAA relayer
@@ -87,7 +87,7 @@ agents/
 common/                   # @whm/common — shared TS (evm, args, migration)
 
 contracts/                # @whm/contracts — Foundry / Solidity
-  src/                    # contracts, grouped by feature (basejump/ oracles/ intents/ utils/)
+  src/                    # contracts, grouped by feature (basejump/ oracles/ intents/ ntt/ utils/)
   test/                   # tests, mirroring src/ layout
   scripts/                # per-feature TS ops scripts
   sh/                     # source-verification helpers
@@ -121,13 +121,13 @@ chopsticks
 contracts
 crates/solana
 agents/broadcaster
-agents/bjscan
+agents/scan
 agents/quoter
 agents/mrelayer
 agents/nintent
 ```
 
-**Agents declare ONLY runtime deps.** The TS toolchain — `typescript`, `tsx`, `esbuild`, `dotenv`, `@types/*` — lives in the **root** `package.json` and resolves from agent packages via upward `node_modules` lookup. Never add these as agent `devDependencies` (a package-specific type like `@types/pg` is the only acceptable exception). New agents follow the `broadcaster`/`bjscan` pattern: workspace member, runtime-deps-only `package.json`, esbuild bundle to `dist/index.js`, `node:NN-slim` Docker copying just the bundle, and a modular `src/` (`config` / `clients` / `watcher` / `api` / `endpoints` / `index`) — not one fat `index.ts`.
+**Agents declare ONLY runtime deps.** The TS toolchain — `typescript`, `tsx`, `esbuild`, `dotenv`, `@types/*` — lives in the **root** `package.json` and resolves from agent packages via upward `node_modules` lookup. Never add these as agent `devDependencies` (a package-specific type like `@types/pg` is the only acceptable exception). New agents follow the `broadcaster`/`scan` pattern: workspace member, runtime-deps-only `package.json`, esbuild bundle to `dist/index.js`, `node:NN-slim` Docker copying just the bundle, and a modular `src/` (`config` / `clients` / `watcher` / `api` / `endpoints` / `index`) — not one fat `index.ts`.
 
 ### Dependency graph
 
@@ -136,7 +136,7 @@ Level 0 (no internal deps):  common
 Level 1:                      contracts        → @whm/common (workspace:*)
                               crates/solana    → (Rust only, no TS workspace deps; common is used by migrations/scripts indirectly)
 Level 2:                      agents/broadcaster → @whm/common; consumes Solana IDL via sync-idl
-                              agents/bjscan      → @whm/common; consumes EVM/Hydration ABIs at runtime
+                              agents/scan        → @whm/common; consumes EVM/Hydration ABIs at runtime
                               migrations/        → @whm/common (top-level orchestration; not a workspace pkg itself)
 ```
 
@@ -153,7 +153,7 @@ Cross-platform glue lives at the **migration** layer and the **IDL/ABI sync** la
 - **Crash-safe.** State is persisted after each step. Resume by re-running the same command; reset a stage with `--from <step-name>`; pause early with `--pause-at <step-name>`.
 - **Upgradeable contracts.** Solidity inherits OZ UUPS upgradeable patterns. Initialization is done in migration steps, not constructors.
 - **Wormhole SDKs.** EVM uses `wormhole-solidity-sdk` (pinned via Soldeer). Solana uses Wormhole Core Bridge through Anchor. `mrelayer` agent uses `@wormhole-foundation/relayer-engine`.
-- **Agent bundling.** `broadcaster`, `bjscan`, and `nintent` bundle to a single `dist/index.js` via esbuild (CJS, node platform; see [esbuild.config.mjs](esbuild.config.mjs)). Avoid top-level await / ESM-only constructs in their `src/`. Agents carry only runtime deps — esbuild, tsx, typescript, and dotenv come from the **root** package.json (see Workspace members).
+- **Agent bundling.** `broadcaster`, `scan`, and `nintent` bundle to a single `dist/index.js` via esbuild (CJS, node platform; see [esbuild.config.mjs](esbuild.config.mjs)). Avoid top-level await / ESM-only constructs in their `src/`. Agents carry only runtime deps — esbuild, tsx, typescript, and dotenv come from the **root** package.json (see Workspace members).
 - **IDL sync.** `broadcaster` consumes the Solana program's IDL — `pnpm run sync-idl` in `agents/broadcaster/` copies `crates/solana/target/idl/oracle_emitter.json` and `crates/solana/target/types/oracle_emitter.ts` into `agents/broadcaster/src/emitter/`. Re-run after Solana program changes.
 - **Ops scripts.** `contracts/scripts/<feature>/` (EVM) and `crates/solana/scripts/<program>/` (Solana) hold one-shot `tsx`/`bash` entry points. They use the per-package `package.json` plus root `.env` for PKs.
 
@@ -199,12 +199,12 @@ Keys are chain names: `hydration`, `moonbeam`, `base`, `ethereum`, `solana`. Ste
 ```
 oracle: revoke ownership (immutable)
 basejump: verify scripts
-bjscan: onIngest hook
+scan: onIngest hook
 contracts: rename BasejumpBase to BasejumpCore
 migrations: merge basejump-base
 ```
 
-Common scopes: `oracle`, `basejump`, `intents`, `bjscan`, `contracts`, `crates`, `migrations`, `broadcaster`. Omit scope for repo-wide or generic changes.
+Common scopes: `oracle`, `basejump`, `intents`, `scan`, `contracts`, `crates`, `migrations`, `broadcaster`. Omit scope for repo-wide or generic changes.
 
 ## Dependencies
 
@@ -219,13 +219,13 @@ Common scopes: `oracle`, `basejump`, `intents`, `bjscan`, `contracts`, `crates`,
 | EVM deps            | Soldeer (forge-std, OZ upgradeable, wormhole-solidity-sdk)                                              |
 | Wormhole            | `wormhole-solidity-sdk`, `@coral-xyz/anchor` (Solana), `@wormhole-foundation/relayer-engine` (mrelayer) |
 | Polkadot interop    | `polkadot-api` (papi), `@galacticcouncil/descriptors`, `@galacticcouncil/common`                        |
-| Web/API             | Fastify + `@fastify/cors` (bjscan)                                                                      |
-| Database            | Postgres via `pg` (bjscan)                                                                              |
+| Web/API             | Fastify + `@fastify/cors` (scan)                                                                      |
+| Database            | Postgres via `pg` (scan)                                                                              |
 | Logging             | winston                                                                                                 |
 
 ## CI & deployment
 
-- **Docker images** — `broadcaster` and `bjscan` ship as multi-arch images via `pnpm run docker:deploy` (uses `docker buildx`). Deploy with `docker stack deploy -c docker-compose.yml whm`.
+- **Docker images** — `broadcaster` and `scan` ship as multi-arch images via `pnpm run docker:deploy` (uses `docker buildx`). Deploy with `docker stack deploy -c docker-compose.yml whm`.
 - **No GitHub Actions workflow** is checked in — releases are manual.
 
 ## Key files
@@ -278,6 +278,6 @@ Common scopes: `oracle`, `basejump`, `intents`, `bjscan`, `contracts`, `crates`,
 - **Keep contracts upgradeable-safe** — they inherit OZ UUPS upgradeable; never add state-init constructors; respect storage layout when adding fields.
 - **Do not commit `.env`** (gitignored). `.env.<context>` templates are checked in (no secrets, just RPCs).
 - **Do not add a TS toolchain dep (`typescript`/`tsx`/`esbuild`/`dotenv`/`@types/*`) to an agent's `package.json`** — those live in the **root** and resolve upward. Agents declare runtime deps only.
-- **`broadcaster`, `bjscan`, and `nintent` bundle to CJS** via esbuild — avoid top-level await or ESM-only constructs in `src/`.
+- **`broadcaster`, `scan`, and `nintent` bundle to CJS** via esbuild — avoid top-level await or ESM-only constructs in `src/`.
 - **Sync IDL/types before merging Solana program changes** — `broadcaster` will silently break against outdated types.
 - **Don't add `ctx.ref` cross-migration calls** — that pattern was removed. Cross-deployment dependencies go through env-config copies.

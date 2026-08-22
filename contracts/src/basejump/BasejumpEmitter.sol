@@ -11,7 +11,7 @@ import {HydrationConsts} from "../utils/hydration/HydrationConsts.sol";
 
 import {IBasejumpEmitter} from "./interfaces/IBasejumpEmitter.sol";
 import {IBasejumpPayload} from "./interfaces/IBasejumpPayload.sol";
-import {INttManager} from "./interfaces/INttManager.sol";
+import {INttManager} from "../ntt/interfaces/INttManager.sol";
 
 /// @title BasejumpEmitter — source end of the direct EVM → Hydration corridor
 /// @notice Funds move on two rails between exactly two chains:
@@ -31,15 +31,8 @@ import {INttManager} from "./interfaces/INttManager.sol";
 contract BasejumpEmitter is Initializable, UUPSUpgradeable, IBasejumpEmitter, IBasejumpPayload {
     using SafeERC20 for IERC20;
 
-    /// @notice Wormhole chain id of the settlement destination. Constant, not storage: `landing` is
-    ///         a single slot, so one deployment already serves exactly one destination — a
-    ///         configurable chain id could never be changed independently of it. Retargeting means
-    ///         a new implementation, not a setter call.
     uint16 public constant DEST_CHAIN_ID = HydrationConsts.WORMHOLE_CHAIN_ID;
-
-    /// @notice Instant-finality publication. The fast path exists to beat source finality; waiting
-    ///         for it would defeat the point. Safety comes from the settlement leg, not from
-    ///         confirmations.
+    
     uint8 public constant CONSISTENCY_INSTANT = 200;
 
     IWormhole public wormhole;
@@ -52,8 +45,7 @@ contract BasejumpEmitter is Initializable, UUPSUpgradeable, IBasejumpEmitter, IB
     /// @notice Landing pool on the destination chain — the settlement recipient.
     bytes32 public landing;
 
-    /// @notice Source asset → the NTT manager that settles it. Per-asset because NTT managers are
-    ///         per-token.
+    /// @notice Source asset → the NTT manager that settles it.
     mapping(address => address) public nttManagerFor;
 
     error NotOwner();
@@ -62,6 +54,8 @@ contract BasejumpEmitter is Initializable, UUPSUpgradeable, IBasejumpEmitter, IB
         if (msg.sender != owner) revert NotOwner();
         _;
     }
+
+    // ─── Init ────────────────────────────────────────────────────
 
     constructor() {
         _disableInitializers();

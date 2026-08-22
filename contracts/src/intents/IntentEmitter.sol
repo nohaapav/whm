@@ -5,190 +5,154 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IWormhole} from "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 
-import {DerivedAccount} from "../utils/DerivedAccount.sol";
-import {XcmV4} from "../utils/XcmV4.sol";
+import {INttManager} from "../ntt/interfaces/INttManager.sol";
 
 import {HydrationConsts} from "../utils/hydration/HydrationConsts.sol";
 import {HydrationRouter} from "../utils/hydration/HydrationRouter.sol";
-import {HydrationPolkadotXcm} from "../utils/hydration/HydrationPolkadotXcm.sol";
-import {HydrationUtility} from "../utils/hydration/HydrationUtility.sol";
-
-import {MoonbeamConsts} from "../utils/moonbeam/MoonbeamConsts.sol";
 
 import {IIntentEmitter} from "./interfaces/IIntentEmitter.sol";
+import {IntentCodec} from "./IntentCodec.sol";
 
-/// @title IntentEmitter — shared Hydration→Moonbeam entry point for NEAR-Intents bridging
-/// @notice One atomic extrinsic, dispatched through Hydration's runtime via the DISPATCH precompile:
+/// @title IntentEmitter — Hydration → Ethereum entry point for NEAR-Intents bridging
+/// @notice Funds and authorization travel separately and meet on NEAR. Two stateless entry points:
 ///
-///           1. FEE  — reserve a fixed `xcmFee` of GLMR for the x-chain hop: bought from A,
-///                     or simply held back when A is already GLMR.
-///           2. SWAP — sell the remaining A for WETH (skipped when A is already WETH).
-///           3. BATCH_ALL of two XCM calls to Moonbeam:
-///                a. transfer_assets_using_type_and_then — reserve-transfer [GLMR, WETH] to the MDA.
-///                b. send — Transact AS the MDA via Moonbeam's Batch precompile. The exact bridge
-///                   call is the ONLY thing that varies between deployments, so it's left to the
-///                   `_bridgeViaWormholeCall` hook: a Basejump batch (IntentEmitterBjp) or a direct
-///                   TokenBridge `transferTokensWithPayload` batch (IntentEmitterWtt). Either way
-///                   native ETH lands at the OneClick quote's intentDepositAddress on Ethereum.
+///           1. VALUE   — placeOrder: sell A for WETH, settle it to an Ethereum address over NTT.
+///           2. MESSAGE — publishOrder: publish the order terms the NEAR router reads `recipient`
+///                        from. Standing, so it is published once per route, not per order.
 ///
-///         Concrete variants implement `_bridgeViaWormholeCall` and own their path-specific config;
-///         everything else (swap, fee, XCM batch, dispatch, params) is shared.
-abstract contract IntentEmitter is Initializable, UUPSUpgradeable, IIntentEmitter {
+///         The derivation path is the hash of the terms, so an authorization can only ever reach the
+///         account its own recipient implies. See docs/intents/v2/{spec,schema}.md.
+///
+/// @dev Placing an order needs nothing from off-chain: the rail's delivery price comes out of the swap
+///      output, which works because Hydration's native currency is WETH.
+contract IntentEmitter is Initializable, UUPSUpgradeable, IIntentEmitter {
     using SafeERC20 for IERC20;
 
+    /// @notice Wormhole chain id of the settlement destination.
     uint16 public constant ETHEREUM_WORMHOLE_ID = 2;
 
+    /// @notice NTT trims to 8 decimals; WETH has 18. The remainder accrues as sweepable dust.
+    uint256 public constant TRIM_UNIT = 1e10;
+
+    /// @notice Neither message carries authority of its own — an order is bound by its path, an
+    ///         instruction is inert until its settlement lands — so both publish instantly.
+    uint8 public constant CONSISTENCY_INSTANT = 200;
+
+    IWormhole public wormhole;
     address public owner;
-    mapping(address => bool) public xcmOperators;
+    uint32 public emitterNonce;
 
-    // --- XCM source (derived H160 on Moonbeam) ---
-    address public xcmSource;
+    /// @notice NTT manager (WETH) on Hydration.
+    address public nttManager;
 
-    // --- XCM defaults (tunable by authorized callers) ---
-    uint256 public xcmFee;
-    uint256 public xcmExecutionFee;
-    uint64 public xcmGasLimit;
-    uint64 public xcmTransactRefTime;
-    uint64 public xcmTransactProofSize;
-
-    // ─── Modifiers ───────────────────────────────────────────────
+    /// @notice NTT recipient (ethereum), which forwards to the instruction's `depositAddress`.
+    address public intentReceiver;
 
     modifier onlyOwner() {
-        _onlyOwner();
+        if (msg.sender != owner) revert NotOwner();
         _;
     }
-
-    modifier onlyXcmOperator() {
-        _onlyXcmOperator();
-        _;
-    }
-
-    // ─── Init ────────────────────────────────────────────────────
 
     constructor() {
         _disableInitializers();
     }
 
-    function _initEmitter() internal onlyInitializing {
+    function initialize(address _wormhole) public initializer {
+        wormhole = IWormhole(_wormhole);
         owner = msg.sender;
-        xcmSource = DerivedAccount.deriveSiblingEvm(HydrationConsts.PARA_ID, address(this));
-        xcmFee = 1_000_000_000_000_000_000; // 1 GLMR: dest arrival fee (<0.1) + remote execution (<0.9)
-        xcmExecutionFee = 900_000_000_000_000_000; // 0.9 GLMR: transact-leg BuyExecution
-        xcmGasLimit = 5_000_000;
-        xcmTransactRefTime = 125_059_217_000;
-        xcmTransactProofSize = 625_000;
+    }
+
+    // ─── Authorization ───────────────────────────────────────────
+
+        /// @inheritdoc IIntentEmitter
+    function publishOrder(Order calldata order)
+        external
+        payable
+        returns (bytes32 authPath, uint64 messageSequence)
+    {
+        bytes memory payload = IntentCodec.encodeOrder(order);
+
+        uint256 fee = wormhole.messageFee();
+        if (msg.value != fee) revert InvalidMessageFee(fee, msg.value);
+
+        authPath = keccak256(payload);
+
+        messageSequence = wormhole.publishMessage{value: fee}(
+            emitterNonce,
+            payload,
+            CONSISTENCY_INSTANT
+        );
+        emitterNonce++;
+
+        emit OrderPublished(authPath, msg.sender, order.orderId, order.recipient, messageSequence);
+    }
+
+    /// @inheritdoc IIntentEmitter
+    function computeAuthPath(Order calldata order) external pure returns (bytes32) {
+        return IntentCodec.authPath(order);
+    }
+
+    /// @inheritdoc IIntentEmitter
+    function computeTerms(Order calldata order) external pure returns (bytes memory) {
+        return IntentCodec.encodeOrder(order);
     }
 
     // ─── Core ────────────────────────────────────────────────────
 
     /// @inheritdoc IIntentEmitter
-    function swapAndBridge(
+    function placeOrder(
         uint32 assetIn,
         uint256 amountIn,
         uint256 minEthOut,
-        uint256 maxFeeIn,
-        bytes32 intentId,
-        address intentDepositAddress,
+        address depositAddress,
         uint256 maxRelayFee
-    ) external {
+    ) external returns (uint64 transferSequence) {
         if (amountIn == 0) revert ZeroAmount();
-        if (intentDepositAddress == address(0)) revert InvalidDepositAddress();
+        if (depositAddress == address(0)) revert InvalidDepositAddress();
+        if (nttManager == address(0) || intentReceiver == address(0)) revert NotConfigured();
 
         IERC20 assetInToken = IERC20(HydrationConsts.toErc20(assetIn));
         IERC20 wethToken = IERC20(HydrationConsts.toErc20(HydrationConsts.WETH_ID));
+
+        // Priced before the swap so the router's own floor can be raised by them.
+        uint256 cost = _cost();
+
+        // Round the floor down to the rail's precision.
+        minEthOut -= minEthOut % TRIM_UNIT;
 
         uint256 wethInitial = wethToken.balanceOf(address(this));
 
         assetInToken.safeTransferFrom(msg.sender, address(this), amountIn);
 
-        _swap(assetInToken, assetIn, amountIn, maxFeeIn);
+        _swap(assetIn, amountIn, minEthOut + cost);
 
         uint256 wethOut = wethToken.balanceOf(address(this)) - wethInitial;
 
-        // Slippage check
-        if (wethOut < minEthOut) revert InsufficientOutput();
+        if (wethOut <= cost) revert AmountBelowDeliveryPrice(wethOut, cost);
 
-        _bridge(wethOut, intentId, intentDepositAddress, maxRelayFee);
+        uint256 bridgeAmount = wethOut - cost;
 
-        emit BridgeInitiated(intentId, msg.sender, assetIn, amountIn, wethOut, intentDepositAddress);
-    }
+        // The remainder stays as dust rather than being refunded — cost more than actual refund.
+        bridgeAmount -= bridgeAmount % TRIM_UNIT;
 
-    // ─── Hook (implemented by concrete variants) ─────────────────
+        if (bridgeAmount == 0) revert AmountBelowTrimUnit(bridgeAmount, TRIM_UNIT);
+        if (bridgeAmount < minEthOut) revert InsufficientOutput();
+        if (maxRelayFee >= bridgeAmount) revert RelayFeeExceedsAmount(maxRelayFee, bridgeAmount);
 
-    /// @dev Build the Moonbeam ethereumXcm.transact payload
-    function _bridgeViaWormholeCall(uint256 ethOut, bytes memory data) internal view virtual returns (bytes memory);
+        transferSequence = _bridge(wethToken, bridgeAmount, depositAddress, maxRelayFee);
 
-    /// @dev Encode the opaque payload bridged end-to-end to the destination receiver. Default carries
-    ///      `(intentId, depositAddress)`; the direct-TokenBridge variant overrides to append
-    ///      `maxRelayFee` so its receiver can bound the relayer's fee claim.
-    function _encodePayload(bytes32 intentId, address depositAddress, uint256 /*maxRelayFee*/)
-        internal
-        pure
-        virtual
-        returns (bytes memory)
-    {
-        return abi.encode(intentId, depositAddress);
+        emit OrderPlaced(
+            transferSequence, depositAddress, msg.sender, assetIn, amountIn, bridgeAmount, maxRelayFee
+        );
     }
 
     // ─── Helpers ─────────────────────────────────────────────────
 
-    function _swap(IERC20 assetInToken, uint32 assetIn, uint256 amountIn, uint256 maxFeeIn) internal {
-        // A is GLMR: Nothing to buy — keep the fee, sell the rest for WETH.
-        if (assetIn == HydrationConsts.GLMR_ID) {
-            uint256 aIn = amountIn - xcmFee;
-            bytes memory buyWeth = HydrationRouter.encodeSell(assetIn, HydrationConsts.WETH_ID, aIn, 0);
-            _dispatch(buyWeth);
-            return;
-        }
-
-        // Buy the GLMR fee, spending at most `maxFeeIn` of A (caller's slippage).
-        uint256 beforeFee = assetInToken.balanceOf(address(this));
-        bytes memory buyFeeAsset = HydrationRouter.encodeBuy(assetIn, HydrationConsts.GLMR_ID, xcmFee, maxFeeIn);
-        _dispatch(buyFeeAsset);
-
-        // Convert the caller's leftover A (their deposit minus what the fee buy consumed) to WETH —
-        // unless A already is WETH. Using the per-call delta rather than balanceOf leaves any stray /
-        // donated A in the contract untouched instead of sweeping it into this caller's bridge.
-        if (assetIn != HydrationConsts.WETH_ID) {
-            uint256 feeSpent = beforeFee - assetInToken.balanceOf(address(this));
-            uint256 aIn = amountIn - feeSpent;
-            bytes memory buyWeth = HydrationRouter.encodeSell(assetIn, HydrationConsts.WETH_ID, aIn, 0);
-            _dispatch(buyWeth);
-        }
-    }
-
-    /// @dev Builds and dispatches batch_all([transfer_assets_using_type_and_then, send]).
-    ///      Split out of swapAndBridge to keep stack depth manageable.
-    function _bridge(uint256 ethOut, bytes32 intentId, address intentDepositAddress, uint256 maxRelayFee)
-        internal
-    {
-        bytes memory beneficiary = XcmV4.accountKey20(xcmSource);
-
-        bytes memory transferCall = HydrationPolkadotXcm.encodeTransferAssets(
-            HydrationPolkadotXcm.TransferParams({
-                destParaId: MoonbeamConsts.PARA_ID,
-                feeLocation: HydrationConsts.GLMR_LOCATION,
-                feeAmount: xcmFee,
-                assetLocation: HydrationConsts.WETH_LOCATION,
-                assetAmount: ethOut,
-                beneficiary: beneficiary
-            })
-        );
-
-        bytes memory sendCall = HydrationPolkadotXcm.encodeSendTransact(
-            HydrationPolkadotXcm.SendTransactParams({
-                destParaId: MoonbeamConsts.PARA_ID,
-                feeLocation: MoonbeamConsts.GLMR_LOCATION,
-                feeAmount: xcmExecutionFee,
-                refTime: xcmTransactRefTime,
-                proofSize: xcmTransactProofSize,
-                transactCall: _bridgeViaWormholeCall(ethOut, _encodePayload(intentId, intentDepositAddress, maxRelayFee)),
-                beneficiary: beneficiary
-            })
-        );
-
-        _dispatch(HydrationUtility.batchAll(transferCall, sendCall));
+    function _cost() internal view returns (uint256) {
+        (, uint256 deliveryPrice) = INttManager(nttManager).quoteDeliveryPrice(ETHEREUM_WORMHOLE_ID, hex"00");
+        return deliveryPrice + wormhole.messageFee();
     }
 
     function _dispatch(bytes memory call) internal {
@@ -196,14 +160,36 @@ abstract contract IntentEmitter is Initializable, UUPSUpgradeable, IIntentEmitte
         if (!success) revert DispatchFailed();
     }
 
-    // ─── Internal ───────────────────────────────────────────────
+    /// @dev Sell the caller's asset for WETH. No-op when A already is WETH.
+    function _swap(uint32 assetIn, uint256 amountIn, uint256 minWethOut) internal {
+        if (assetIn == HydrationConsts.WETH_ID) return;
 
-    function _onlyOwner() internal view {
-        if (msg.sender != owner) revert NotOwner();
+        bytes memory sellForWeth =
+            HydrationRouter.encodeSell(assetIn, HydrationConsts.WETH_ID, amountIn, minWethOut);
+        _dispatch(sellForWeth);
     }
 
-    function _onlyXcmOperator() internal view {
-        if (!xcmOperators[msg.sender]) revert NotXcmOperator();
+    /// @dev Settle to the receiver and publish where it forwards.
+    function _bridge(
+        IERC20 wethToken,
+        uint256 amount,
+        address depositAddress,
+        uint256 maxRelayFee
+    ) internal returns (uint64 sequence) {
+        (, uint256 deliveryPrice) = INttManager(nttManager).quoteDeliveryPrice(ETHEREUM_WORMHOLE_ID, hex"00");
+
+        wethToken.forceApprove(nttManager, amount);
+
+        // Paused rail or a rate-limit reverts rather than queueing a settlement.
+        sequence = INttManager(nttManager).transfer{value: deliveryPrice}(
+            amount, ETHEREUM_WORMHOLE_ID, bytes32(uint256(uint160(intentReceiver)))
+        );
+
+        bytes memory instruction = abi.encode(sequence, depositAddress, amount, maxRelayFee);
+        wormhole.publishMessage{value: wormhole.messageFee()}(
+            emitterNonce, instruction, CONSISTENCY_INSTANT
+        );
+        emitterNonce++;
     }
 
     // ─── Upgrade ─────────────────────────────────────────────────
@@ -216,23 +202,23 @@ abstract contract IntentEmitter is Initializable, UUPSUpgradeable, IIntentEmitte
         owner = newOwner;
     }
 
-    function setXcmOperator(address operator, bool enabled) external onlyOwner {
-        xcmOperators[operator] = enabled;
-        emit XcmOperatorUpdated(operator, enabled);
+    /// @notice Point settlement at the WETH NTT manager.
+    /// @dev Reverts unless the manager's token is Hydration WETH.
+    function setNttManager(address manager) external onlyOwner {
+        address expected = HydrationConsts.toErc20(HydrationConsts.WETH_ID);
+        address actual = INttManager(manager).token();
+        if (actual != expected) revert SettlementRouteMismatch(expected, actual);
+        nttManager = manager;
     }
 
-    function setXcmParams(
-        uint256 _xcmFee,
-        uint256 _xcmExecutionFee,
-        uint64 _gasLimit,
-        uint64 _refTime,
-        uint64 _proofSize
-    ) external onlyXcmOperator {
-        xcmFee = _xcmFee;
-        xcmExecutionFee = _xcmExecutionFee;
-        xcmGasLimit = _gasLimit;
-        xcmTransactRefTime = _refTime;
-        xcmTransactProofSize = _proofSize;
-        emit XcmDefaultsUpdated(_xcmFee, _xcmExecutionFee, _gasLimit, _refTime, _proofSize);
+    /// @notice Point settlements at the Ethereum receiver that forwards them.
+    function setIntentReceiver(address receiver) external onlyOwner {
+        intentReceiver = receiver;
+    }
+
+    /// @notice Recover quantization dust, or any asset sent here by mistake.
+    function sweep(address asset, address to, uint256 amount) external onlyOwner {
+        IERC20(asset).safeTransfer(to, amount);
+        emit Swept(asset, to, amount);
     }
 }

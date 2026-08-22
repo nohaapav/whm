@@ -1,49 +1,15 @@
 version: '3.3'
 services:
-  app:
-    image: galacticcouncil/mrelayer:latest
-    environment:
-      ACALA_FROM_SEQ: '3408'
-      BASE_FROM_SEQ: '249354'
-      ETH_FROM_SEQ: '625934'
-      MOONBEAM_RPC: https://rpc.api.moonbeam.network
-      ORACLE_ETH_FROM_SEQ: '23'
-      PRIVKEY: FILL THIS KEY ALWAYS
-      REDIS_HOST: redis
-      SOLANA_FROM_SEQ: '1379804'
-      SPY_ENDPOINT: spy:7073
-      SUI_FROM_SEQ: '222468'
-      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
-    networks:
-      - default
-    logging:
-      driver: json-file
-    deploy:
-      labels:
-        swarmpit.service.deployment.autoredeploy: 'true'
-  base:
+  hydration:
     image: galacticcouncil/mrelayer:latest
     command:
-      - start:base
+      - start:hydration
     environment:
-      MOONBEAM_FROM_SEQ: '95331'
-      PRIVKEY: FILL THIS KEY ALWAYS
-      REDIS_HOST: redis
-      SPY_ENDPOINT: spy:7073
-      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
-    networks:
-      - default
-    logging:
-      driver: json-file
-    deploy:
-      labels:
-        swarmpit.service.deployment.autoredeploy: 'true'
-  eth:
-    image: galacticcouncil/mrelayer:latest
-    command:
-      - start:eth
-    environment:
-      MOONBEAM_FROM_SEQ: '95532'
+      HYDRATION_RPC: https://hydration-rpc.n.dwellir.com
+      NTT_BASE_FROM_SEQ: '0'
+      NTT_ETH_FROM_SEQ: '0'
+      NTT_SOLANA_FROM_SEQ: '0'
+      NTT_SUI_FROM_SEQ: '0'
       PRIVKEY: FILL THIS KEY ALWAYS
       REDIS_HOST: redis
       SPY_ENDPOINT: spy:7073
@@ -60,9 +26,13 @@ services:
     command:
       - start:intent
     environment:
-      MOONBEAM_FROM_SEQ: '0'
+      ETH_RPC: https://eth.llamarpc.com
+      HYDRATION_FROM_SEQ: '0'
+      HYDRATION_RPC: https://hydration-rpc.n.dwellir.com
+      INTENT_EMITTER: FILL THIS ADDRESS # IntentEmitter on Hydration
       INTENT_PRIVKEY: FILL THIS KEY ALWAYS
-      INTENT_RECEIVER: FILL THIS ADDRESS
+      INTENT_RECEIVER: FILL THIS ADDRESS # IntentReceiver on Ethereum
+      NTT_TRANSCEIVER: FILL THIS ADDRESS # WormholeTransceiver (WETH) on Hydration
       QUOTER_URL: http://quoter:8080 # reachable quoter service (deployed separately)
       REDIS_HOST: redis
       SPY_ENDPOINT: spy:7073
