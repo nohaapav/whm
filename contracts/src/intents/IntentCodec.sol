@@ -6,7 +6,7 @@ import {IIntentEmitter} from "./interfaces/IIntentEmitter.sol";
 /// @title IntentCodec — the order wire format
 /// @notice Packed big-endian. The payload IS the terms, so the NEAR router hashes what it received
 ///         in full. Packed rather than ABI because the decoder is Rust. Layout and rationale:
-///         docs/intents/v2/schema.md §2.
+///         docs/intents/schema.md §2.
 ///
 ///           offset  size  field          offset  size  field
 ///                0     1  version            36     1  destAssetLen (D)
@@ -29,9 +29,6 @@ library IntentCodec {
     /// @dev Fixed prefix through `destAssetLen`, i.e. everything before the first string.
     uint256 internal constant ORDER_HEADER_SIZE = 37;
 
-    /// @dev Fixed width — the transfer instruction carries no strings.
-    uint256 internal constant TRANSFER_SIZE = 61;
-
     error InvalidOrderId();
     error InvalidRecipientKind(uint8 kind);
     error InvalidDestinationAsset(uint256 length);
@@ -39,8 +36,6 @@ library IntentCodec {
     error InvalidVersion(uint8 version);
     /// @dev Declared lengths do not account for the buffer exactly.
     error MalformedTerms(uint256 length);
-    error MalformedTransfer(uint256 length);
-    error InvalidDepositAddress();
 
     // ─── Order ───────────────────────────────────────────────────
 

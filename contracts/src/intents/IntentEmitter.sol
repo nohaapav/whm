@@ -23,7 +23,7 @@ import {IntentCodec} from "./IntentCodec.sol";
 ///                        from. Standing, so it is published once per route, not per order.
 ///
 ///         The derivation path is the hash of the terms, so an authorization can only ever reach the
-///         account its own recipient implies. See docs/intents/v2/{spec,schema}.md.
+///         account its own recipient implies. See docs/intents/{spec,schema}.md.
 ///
 /// @dev Placing an order needs nothing from off-chain: the rail's delivery price comes out of the swap
 ///      output, which works because Hydration's native currency is WETH.

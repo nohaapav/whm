@@ -23,7 +23,7 @@ interface IIntentEmitter {
     /// @param destinationAsset Intents token id to acquire, e.g. `nep141:zec.omft.near`
     /// @param recipient Final destination address. The value the whole design protects.
     /// @dev The NEAR account is absent by design: it is derived *from* these terms, so the router
-    ///      recomputes it. See docs/intents/v2/schema.md §1.
+    ///      recomputes it. See docs/intents/schema.md §1.
     struct Order {
         bytes32 orderId;
         uint16 maxSlippageBps;

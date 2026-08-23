@@ -24,7 +24,7 @@ const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 /**
  * NIR v2 PoC — account derivation and the deposit leg, with nothing deployed.
  *
- * Probes the paths in docs/intents/v2/spec.md that do not need IntentEmitter or IntentRouter to
+ * Probes the paths in docs/intents/spec.md that do not need IntentEmitter or IntentRouter to
  * exist. The trick is that MPC derivation is keyed on the *caller*, so any NEAR account you hold a
  * full-access key for stands in for the router: `derived_public_key` takes `predecessor` as an
  * argument (so anyone can compute anyone's account), and `sign` takes it from the runtime caller (so

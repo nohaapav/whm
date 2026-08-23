@@ -34,11 +34,10 @@ Cross-chain infrastructure connecting EVM chains, Solana, Sui and Hydration via 
 Solana program reads Kamino Scope oracle prices + SPL stake pool rates and broadcasts them through Wormhole to a Hydration receiver, which forwards price updates to Hydration's on-chain oracle. Ethereum-source variant uses an EVM `OracleEmitter` reading wstETH / apyUSD rates directly.
 
 - [Spec](docs/oracle/spec.md)
-- [Schema](docs/oracle/schema.md)
 
 ### Basejump
 
-Instant cross-chain token bridging between EVM source chains and Hydration. Fast-path settles in ~2 min against a pre-funded landing pool; slow Wormhole Token Bridge transfer replenishes the pool in the background (~13 min).
+Instant cross-chain token bridging from EVM source chains to Hydration. A fast-path message pays the user in ~2 min out of a pre-funded landing pool; a slow Wormhole NTT settlement replenishes the pool in the background (~13 min).
 
 - [Spec](docs/basejump/spec.md)
 - [Schema](docs/basejump/schema.md)

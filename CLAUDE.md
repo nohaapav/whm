@@ -9,9 +9,9 @@ It lists available reference documents and their raw GitHub URLs.
 
 ## Project overview
 
-Cross-chain messaging infrastructure connecting EVM chains, Solana, and Hydration via Moonbeam. Three concerns:
+Cross-chain messaging infrastructure connecting EVM chains, Solana, Sui and Hydration over Wormhole. Three concerns:
 
-1. **On-chain contracts** — upgradeable Solidity (Foundry) on Base/Moonbeam/Hydration/Ethereum + an Anchor program on Solana.
+1. **On-chain contracts** — upgradeable Solidity (Foundry) on Base/Hydration/Ethereum + an Anchor program on Solana.
 2. **Off-chain agents** — long-running TS services that publish/index/relay (`broadcaster`, `scan`, `relayer`).
 3. **Shared tooling** — a crash-safe migration runner, shared chain/wallet/args utilities, and the `migrations/` top-level orchestration.
 
@@ -21,9 +21,9 @@ Cross-chain messaging infrastructure connecting EVM chains, Solana, and Hydratio
 
 ### Use cases
 
-- **Oracle Relay** — Solana program reads Kamino Scope prices + SPL stake-pool rates, broadcasts via Wormhole to Moonbeam, which forwards to Hydration's on-chain oracle via XCM. Ethereum-source variant reads wstETH / apyUSD rates directly. See [docs/oracle/spec.md](docs/oracle/spec.md), [docs/oracle/schema.md](docs/oracle/schema.md).
-- **Basejump** — Instant cross-chain token bridging between EVM chains and Hydration via Moonbeam. Fast-path settles in ~2 min against a pre-funded landing pool; slow Wormhole TokenBridge transfer replenishes (~13 min). See [docs/basejump/spec.md](docs/basejump/spec.md), [docs/basejump/schema.md](docs/basejump/schema.md).
-- **Intents** — Hydration users get any NEAR-Intents-supported asset (BTC, ZEC, NEAR, …) via OneClick quotes. One Hydration extrinsic (`IntentEmitterWtt.swapAndBridge`) swaps the user's asset → WETH and bridges it via Moonbeam + Wormhole **TokenBridge** (`transferTokensWithPayload`, a single payload-3 message); on Ethereum a relayer (`mrelayer`) redeems the VAA at `IntentReceiver`, which unwraps WETH → native ETH and forwards it into the quote's `depositAddress`. This is the deployed **WTT** variant; a Basejump-pooled **BJP** alternative (`IntentEmitterBjp` → `IntentRouter`) exists for slow-finality sources but is not deployed for intents. See [docs/intents/spec.md](docs/intents/spec.md), [docs/intents/fee.md](docs/intents/fee.md), [docs/intents/relay-fee.md](docs/intents/relay-fee.md).
+- **Oracle Relay** — Solana (Kamino Scope prices + SPL stake-pool rates) and Ethereum (wstETH / apyUSD rates) emitters publish via Wormhole; an `OracleReceiver` on Hydration's EVM verifies the VAA and writes straight to the oracle. See [docs/oracle/spec.md](docs/oracle/spec.md).
+- **Basejump** — Instant cross-chain token bridging from EVM chains to Hydration. Two rails leave the same transaction: a fast-path message pays the user in ~2 min out of a pre-funded landing pool, and a slow Wormhole **NTT** settlement replenishes that pool (~13 min). The difference is the fee. See [docs/basejump/spec.md](docs/basejump/spec.md), [docs/basejump/schema.md](docs/basejump/schema.md), [docs/basejump/indexer.md](docs/basejump/indexer.md).
+- **Intents** — Hydration users get any NEAR-Intents-supported asset (BTC, ZEC, NEAR, …). `IntentEmitter.placeOrder` (Hydration) sells the user's asset for WETH and settles it to Ethereum over **NTT**, publishing a forwarding instruction beside each settlement; `IntentReceiver.processOrder` (Ethereum) pairs the two, delivers, pays the relayer, and forwards the rest to a `depositAddress`. That address is either a 1Click quote address or one MPC-derived from a standing order — the contracts cannot tell them apart. See [docs/intents/spec.md](docs/intents/spec.md), [docs/intents/schema.md](docs/intents/schema.md), [docs/intents/relay-fee.md](docs/intents/relay-fee.md).
 
 ## Build & test
 
@@ -55,7 +55,6 @@ pnpm start
 
 ```sh
 pnpm fork:base          # :8546
-pnpm fork:moonbeam      # :8545
 pnpm fork:hydration     # :8547
 pnpm fork:ethereum      # :8550
 pnpm fork:all           # parallel
@@ -80,7 +79,7 @@ Full migration model + conventions: [migrations/README.md](migrations/README.md)
 agents/
   broadcaster/            # @whm/broadcaster — Solana → Wormhole price/rate publisher
   scan/                   # @whm/scan — multi-feature indexer (basejump, intents)
-  nintent/                # @whm/nintent — intent deposit notifier (IntentForwarded → 1Click)
+  nintent/                # @whm/nintent — intent deposit notifier (OrderProcessed → 1Click)
   quoter/                 # @whm/quoter — relay-fee quoter service
   relayer/                # @whm/relayer — Wormhole VAA relayer (hydration-ntt, intent)
 
@@ -183,14 +182,14 @@ Phases group naturally by NNN order:
 ### Env var naming (inside `migrations/envs/<context>/<migration>.env`)
 
 - Chain-prefixed: `RPC_<CHAIN>`, `CHAIN_ID_<CHAIN>`, `WORMHOLE_CORE_<CHAIN>`, `TOKEN_BRIDGE_<CHAIN>`, `WORMHOLE_ID_<CHAIN>`.
-- Single-chain (Moonbeam-only XcmTransactor): unprefixed (`DESTINATION_PARA_ID`, `FEE_ASSET`, etc.).
+- Single-chain values with no ambiguity: unprefixed (`XCM_FEE`, `FEE_ASSET`, etc.).
 - Asset-prefixed: `<ASSET>_<thing>` (e.g. `EURC_FEE_ASSET`, `PRIME_ASSET_ID_BYTES32`).
 - Ownership: `<contract>_NEW_OWNER`.
 - **PKs**: NOT in env files; live in shell env or root `.env`.
 
 ### Wallet keys (inside migration `WalletContext`)
 
-Keys are chain names: `hydration`, `moonbeam`, `base`, `ethereum`, `solana`. Step files use `ctx.wallet.<chain>`.
+Keys are chain names: `hydration`, `base`, `ethereum`, `solana`. Step files use `ctx.wallet.<chain>`.
 
 ## Commit & PR conventions
 
@@ -200,7 +199,7 @@ Keys are chain names: `hydration`, `moonbeam`, `base`, `ethereum`, `solana`. Ste
 oracle: revoke ownership (immutable)
 basejump: verify scripts
 scan: onIngest hook
-contracts: rename BasejumpBase to BasejumpCore
+contracts: rename IntentReceiver.redeem to processOrder
 migrations: merge basejump-base
 ```
 
@@ -208,20 +207,20 @@ Common scopes: `oracle`, `basejump`, `intents`, `scan`, `contracts`, `crates`, `
 
 ## Dependencies
 
-| Concern             | Tool                                                                                                    |
-| ------------------- | ------------------------------------------------------------------------------------------------------- |
-| Package manager     | pnpm 10 (workspaces)                                                                                    |
-| Language (TS)       | TypeScript 5.7 (strict, ES2022 target)                                                                  |
-| Language (Solidity) | Solidity via Foundry (`forge`, `anvil`)                                                                 |
-| Language (Rust)     | Cargo + Anchor 0.32                                                                                     |
-| TS bundler          | esbuild (CJS, node platform — for agents)                                                               |
-| TS runner           | `tsx` for scripts; runner is `@whm/common/migration`                                                    |
-| EVM deps            | Soldeer (forge-std, OZ upgradeable, wormhole-solidity-sdk)                                              |
+| Concern             | Tool                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------ |
+| Package manager     | pnpm 10 (workspaces)                                                                                   |
+| Language (TS)       | TypeScript 5.7 (strict, ES2022 target)                                                                 |
+| Language (Solidity) | Solidity via Foundry (`forge`, `anvil`)                                                                |
+| Language (Rust)     | Cargo + Anchor 0.32                                                                                    |
+| TS bundler          | esbuild (CJS, node platform — for agents)                                                              |
+| TS runner           | `tsx` for scripts; runner is `@whm/common/migration`                                                   |
+| EVM deps            | Soldeer (forge-std, OZ upgradeable, wormhole-solidity-sdk)                                             |
 | Wormhole            | `wormhole-solidity-sdk`, `@coral-xyz/anchor` (Solana), `@wormhole-foundation/relayer-engine` (relayer) |
-| Polkadot interop    | `polkadot-api` (papi), `@galacticcouncil/descriptors`, `@galacticcouncil/common`                        |
-| Web/API             | Fastify + `@fastify/cors` (scan)                                                                      |
-| Database            | Postgres via `pg` (scan)                                                                              |
-| Logging             | winston                                                                                                 |
+| Polkadot interop    | `polkadot-api` (papi), `@galacticcouncil/descriptors`, `@galacticcouncil/common`                       |
+| Web/API             | Fastify + `@fastify/cors` (scan)                                                                       |
+| Database            | Postgres via `pg` (scan)                                                                               |
+| Logging             | winston                                                                                                |
 
 ## CI & deployment
 
@@ -256,11 +255,10 @@ Common scopes: `oracle`, `basejump`, `intents`, `scan`, `contracts`, `crates`, `
 
 ### Tracing code across the repo
 
-- **Oracle path (Solana source):** Solana `oracle-emitter` (Anchor) → Wormhole Core Bridge (VAA) → `mrelayer` → `OracleDispatcher` on Moonbeam (extends `MessageReceiver`) → `XcmTransactor` → Hydration oracle pallet.
-- **Oracle path (Ethereum source):** `OracleEmitter` on Ethereum → Wormhole → (parallel) `OracleDispatcher` proxy on Moonbeam → `XcmTransactor` → Hydration. Each source chain has its OWN dispatcher + transactor proxy pair (renounced ownership = no shared infra).
-- **Basejump path:** Source EVM `Basejump.sol` → Wormhole → `BasejumpProxy.sol` (Moonbeam) → `XcmTransactor` → `BasejumpLanding.sol` (Hydration). Fast-path is a separate signed VAA flow handled by `Basejump.completeTransfer`.
-- **Intents path (WTT, deployed):** `IntentEmitterWtt.sol` (Hydration) swaps the user's asset → WETH, then via XCM `batch_all` (reserve-transfer WETH+GLMR to its Moonbeam MDA + Transact-as-MDA) approves the Wormhole TokenBridge and calls `transferTokensWithPayload(WETH, …, IntentReceiver, payload=(intentId, depositAddress, maxRelayFee))` — a single payload-3 VAA. Off-chain `mrelayer` (app-intent) sizes a relay fee via `quoter` and calls `IntentReceiver.redeem(vaa, feeRequested)` on Ethereum → unwrap WETH → native ETH → pay relayer (≤ `maxRelayFee`) → forward to OneClick `depositAddress`; emits `IntentForwarded`. `nintent` then nudges OneClick. The shared abstract `IntentEmitter.sol` base differs only in the `_bridgeViaWormholeCall` hook; the **BJP** variant (`IntentEmitterBjp` → `BasejumpProxy` → `Basejump`/`BasejumpLandingNative` → `IntentRouter`) is the pooled fast-path alternative, not deployed for intents.
-- **Off-chain:** `broadcaster` reads Solana oracle state and signs `send_price` / `send_rate` instructions. `bjscan` indexes Basejump events from Moonbeam/Base/Hydration and exposes them via Fastify. `relayer` polls Wormhole for VAAs and submits them to receiver contracts.
+- **Oracle path:** source emitter → Wormhole (VAA) → `OracleReceiver` on Hydration's EVM (extends `MessageReceiver`) → `oracle.setPrice()`, all in one transaction. Solana's emitter is the `oracle-emitter` Anchor program; Ethereum's is `OracleEmitter.sol`. Each source has its OWN receiver deployment, renounced independently — an oracle serving both authorizes both receiver addresses. The relay leg is not implemented; it needs an `oracle` feature in `agents/relayer`.
+- **Basejump path:** Source EVM `BasejumpEmitter.sol` fires two rails in one call — an NTT settlement of the gross amount addressed to the landing, then a fast-path Wormhole message of the net amount. `BasejumpReceiver.completeTransfer` (Hydration) verifies that message and calls `BasejumpLanding.sol`, which pays the recipient through the `0x0401` dispatch precompile or queues on a shortfall. Settlement precedes publication, so a payout can never outrun its settlement.
+- **Intents path:** `IntentEmitter.placeOrder(assetIn, amountIn, minEthOut, depositAddress, maxRelayFee)` (Hydration) sells the asset for WETH via the router, then in one call settles it over NTT to `IntentReceiver` **and** publishes `abi.encode(sequence, depositAddress, amount, maxRelayFee)` as its own Wormhole message — NTT carries no payload, so the destination travels separately. Both legs key on the NTT **manager's** sequence. On Ethereum, `agents/relayer` (intent feature) reads the settlement, finds the instruction in the source tx's `LogMessagePublished` logs, sizes a fee via `quoter`, and calls `IntentReceiver.processOrder(nttVaa, instructionVaa, feeRequested)` → deliver → pay caller → forward the rest; emits `OrderProcessed`, which `nintent` uses to nudge 1Click. Separately, `IntentEmitter.publishOrder(Order)` publishes a standing authorization whose MPC derivation path is `keccak256(terms)` — see [docs/intents/spec.md](docs/intents/spec.md).
+- **Off-chain:** `broadcaster` reads Solana oracle state and signs `send_price` / `send_rate` instructions. `scan` indexes Basejump and Intents events from Base/Ethereum/Hydration and exposes them via Fastify. `relayer` polls Wormhole for VAAs and submits them to receiver contracts.
 - **Shared:** `@whm/common` exports `chains`, `ifs`, `wallet`, `args`, `migration`. Any change here affects all consumers.
 
 ### Validating changes

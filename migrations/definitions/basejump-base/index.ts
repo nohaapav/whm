@@ -27,7 +27,7 @@ import type { MigrationConfig } from "./types";
  * REUSES the existing landing 0x70e9b12c…df976 — it already holds the EURC pool, is already
  * mapped EURC -> asset 44, and is already TC-owned. Nothing here deploys or configures it.
  * Because it is TC-owned, authorizing the receiver on it is a TC action, NOT a step here —
- * see docs/basejump/direct-hydration.md. That call is the go-live switch; until it lands the
+ * see docs/basejump/spec.md. That call is the go-live switch; until it lands the
  * corridor stays dark and this migration is safe to run in full.
  *
  * Inbound only, by code rather than by configuration: the emitter declares no receive path

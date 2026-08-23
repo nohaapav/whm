@@ -1,52 +1,61 @@
 # Basejump Indexer Spec
 
+Event reference for the Basejump corridor. The indexer that consumes these is
+[`scan`](../scan/spec.md); the corridor itself is [spec.md](spec.md).
+
 ## Overview
 
-Basejump is a cross-chain bridging system that delivers tokens instantly using a fast-path message while a slow TokenBridge transfer settles in the background (~13 min). The indexer tracks transfer lifecycle across three chains.
+Basejump delivers tokens instantly from a pre-funded pool on the destination while an NTT settlement
+replenishes that pool in the background (~13 min). Two chains per corridor: the source EVM and
+Hydration.
 
-## Chains & Contracts
+## Chains & contracts
 
-| Chain     | Contract        | Address                                      |
-| --------- | --------------- | -------------------------------------------- |
-| Base      | Basejump        | `0xf5b9334e44f800382cb47fc19669401d694e529b` |
-| Moonbeam  | BasejumpProxy   | `0xf5b9334e44f800382cb47fc19669401d694e529b` |
-| Hydration | BasejumpLanding | `0x70e9b12c3b19cb5f0e59984a5866278ab69df976` |
+| Chain     | Contract          | Notes                                                  |
+| --------- | ----------------- | ------------------------------------------------------ |
+| Base      | `BasejumpEmitter` | emits `BridgeInitiated`                                |
+| Hydration | `BasejumpReceiver` | emits `TransferProcessed`                              |
+| Hydration | `BasejumpLanding` | `0x70e9b12c3b19cb5f0e59984a5866278ab69df976` — delivery |
 
-More source chains will be added over time (same contract interfaces).
+More source chains will be added with the same interfaces and event signatures. The receiver and the
+landing are shared across corridors — one Hydration deployment serves every source.
 
-## Events to Index
+## Events to index
 
-### Outgoing — Basejump (Base)
+### Source — `BasejumpEmitter`
 
-**`BridgeInitiated`** — emitted when a user starts a transfer
+**`BridgeInitiated`** — a transfer started.
 
 ```solidity
 event BridgeInitiated(
     address indexed asset,     // source token address
-    uint256 amount,            // gross amount (before fee)
-    uint256 fee,               // fee deducted
-    uint16 destChain,          // Wormhole destination chain ID
+    uint256 amount,            // GROSS amount (before fee)
+    uint256 fee,               // fee withheld from the fast leg
+    uint16 destChain,          // Wormhole destination chain id (73)
     bytes32 recipient,         // destination recipient
-    uint64 transferSequence,   // TokenBridge slow-path sequence
-    uint64 messageSequence     // Wormhole fast-path message sequence
+    uint64 transferSequence,   // NTT manager sequence — the settlement leg
+    uint64 messageSequence     // Wormhole sequence — the fast-path message
 )
 ```
 
-### Relay — BasejumpProxy (Moonbeam)
+`transferSequence` is the NTT **manager's** message sequence, not a Wormhole sequence and not
+chain-global. See the [indexer note](spec.md#adding-a-token) on keying by it.
 
-**`TransferProcessed`** — emitted when a fast-path VAA is received and forwarded to landing
+### Destination — `BasejumpReceiver` (Hydration)
+
+**`TransferProcessed`** — fast-path VAA verified and forwarded to the landing.
 
 ```solidity
 event TransferProcessed(
     address indexed sourceAsset,
-    uint256 amount,
+    uint256 amount,            // NET
     bytes32 indexed recipient
 )
 ```
 
-### Incoming — BasejumpLanding (Hydration)
+### Destination — `BasejumpLanding` (Hydration)
 
-**`TransferExecuted`** — tokens delivered to recipient instantly
+**`TransferExecuted`** — delivered to the recipient.
 
 ```solidity
 event TransferExecuted(
@@ -57,7 +66,7 @@ event TransferExecuted(
 )
 ```
 
-**`TransferQueued`** — insufficient liquidity, transfer queued for later
+**`TransferQueued`** — pool short, queued for later.
 
 ```solidity
 event TransferQueued(
@@ -69,7 +78,7 @@ event TransferQueued(
 )
 ```
 
-**`PendingTransferFulfilled`** — queued transfer fulfilled after liquidity arrived
+**`PendingTransferFulfilled`** — queued transfer delivered once liquidity arrived.
 
 ```solidity
 event PendingTransferFulfilled(
@@ -81,24 +90,29 @@ event PendingTransferFulfilled(
 )
 ```
 
-## Transfer Lifecycle
+## Transfer lifecycle
 
-A single transfer produces events across chains in this order:
+`TransferProcessed` and the landing's outcome event are emitted in the **same transaction** —
+delivery is one atomic call on Hydration, so they never appear apart. Ordering:
 
-1. `BridgeInitiated` on the source chain — transfer started
-2. `TransferProcessed` on the relay chain (Moonbeam for EVM→Hydration, or source EVM for Hydration→EVM) — fast-path VAA verified
-3. `TransferExecuted` **or** `TransferQueued` on the destination — delivery outcome
-4. (If queued) `PendingTransferFulfilled` — delivered after settlement replenished liquidity
+1. `BridgeInitiated` on the source — transfer started
+2. `TransferProcessed` on Hydration — fast-path VAA verified
+3. `TransferExecuted` **or** `TransferQueued`, same tx as (2) — delivery outcome
+4. (if queued) `PendingTransferFulfilled` — delivered after settlement replenished the pool
+
+A revert anywhere in (2)–(3) unwinds both, so a `TransferProcessed` without an outcome event in the
+same transaction cannot happen. `TransferQueued` is the case to alarm on: the VAA is consumed and
+nothing drains the queue automatically.
 
 ## Correlation
 
-Link events into a single transfer using:
+- **`transferSequence`** from `BridgeInitiated` — the NTT manager sequence, also the key carried in
+  the fast-path payload. The strongest join.
+- **`recipient`** (bytes32) — present in every event.
+- **`sourceAsset`** + **`amount`** — note `BridgeInitiated.amount` is **gross**; every destination
+  event carries **net** (`amount - fee`).
 
-- **`recipient`** (bytes32) — present in all events
-- **`sourceAsset`** + **`amount`** — match across events (note: `BridgeInitiated.amount` is gross, delivery events use net = `amount - fee`)
-- **`transferSequence`** / **`messageSequence`** from `BridgeInitiated` — can be cross-referenced with Wormhole VAA data if needed
-
-## Transfer States
+## Transfer states
 
 | State       | Determined by                                    |
 | ----------- | ------------------------------------------------ |
@@ -110,7 +124,7 @@ Link events into a single transfer using:
 
 ## Notes
 
-- V1 supports a single token: EURC (`0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42` on Base)
-- `recipient` is bytes32 — on EVM it's a left-zero-padded address, on Substrate it's an AccountId32
-- New source chains will be added with the same contract interfaces and event signatures
-- The `Withdrawn` and `DestAssetUpdated` events on BasejumpLanding are admin-only and can be ignored for transfer indexing
+- V1 supports one token per source: EURC (`0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42` on Base).
+- `recipient` is bytes32 — a left-zero-padded address on EVM, an AccountId32 on Hydration.
+- `Withdrawn` and `DestAssetUpdated` on the landing are admin-only; ignore them for transfer
+  indexing.

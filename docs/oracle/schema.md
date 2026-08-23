@@ -12,8 +12,8 @@ Cross-chain data flow per source, contract / program structure per side, shared 
 ═══════════════════════════════════════════════════════════════════════════════════
 
 
-   SOLANA                       WORMHOLE               MOONBEAM (EVM)                HYDRATION (EVM)
-  ─────────                     ─────────              ──────────────               ────────────────
+   SOLANA                       WORMHOLE                     HYDRATION (EVM)
+  ─────────                     ─────────                   ────────────────
 
 ┌──────────────────┐
 │  Kamino Scope    │
@@ -46,27 +46,26 @@ Cross-chain data flow per source, contract / program structure per side, shared 
                                                              │ inherits
                                                              ▼
                                                  ┌───────────────────────┐
-                                                 │  OracleDispatcher     │
+                                                 │  OracleReceiver       │
                                                  │  (UUPS Proxy)         │
                                                  │                       │
                                                  │  Routes by action:    │
                                                  │  ┌──────────────────┐ │
                                                  │  │ ACTION_PRICE (1) │ │
                                                  │  │ ACTION_RATE  (2) │ │
-                                                 │  │ → transactor     │ │
                                                  │  └────────┬─────────┘ │
+                                                 │  - stale checks       │
+                                                 │  - value ÷ 1e10       │
+                                                 │  - assetId → oracle   │
                                                  └───────────┼───────────┘
-                                                             │ calls
+                                                             │ same-chain call
                                                              ▼
-                                                 ┌───────────────────────┐       ┌────────────────────┐
-                                                 │  XcmTransactor        │       │                    │
-                                                 │  (UUPS Proxy)         │  XCM  │  Hydration         │
-                                                 │                       │──────►│  Parachain         │
-                                                 │  - SCALE encoding     │       │                    │
-                                                 │  - XCM precompile     │       │  evm.call →        │
-                                                 │    (0x0817)           │       │  Oracle.setPrice() │
-                                                 │  - derived H160 addr  │       │                    │
-                                                 └───────────────────────┘       └────────────────────┘
+                                                 ┌───────────────────────┐
+                                                 │  ManagedOracle        │
+                                                 │  setPrice(int256)     │
+                                                 │  (authorizes this     │
+                                                 │   receiver's address) │
+                                                 └───────────────────────┘
 ```
 
 ### Ethereum source
@@ -77,8 +76,8 @@ Cross-chain data flow per source, contract / program structure per side, shared 
 ═══════════════════════════════════════════════════════════════════════════════════
 
 
-   ETHEREUM                       WORMHOLE               MOONBEAM (EVM)                HYDRATION (EVM)
-  ──────────                     ─────────              ──────────────               ────────────────
+   ETHEREUM                       WORMHOLE                    HYDRATION (EVM)
+  ──────────                     ─────────                   ────────────────
 
 ┌──────────────────┐
 │  wstETH          │
@@ -116,30 +115,26 @@ Cross-chain data flow per source, contract / program structure per side, shared 
                                                               │ inherits
                                                               ▼
                                                   ┌───────────────────────┐
-                                                  │  OracleDispatcher     │
-                                                  │  (UUPS Proxy, fresh)  │
+                                                  │  OracleReceiver       │
+                                                  │  (UUPS Proxy, fresh   │
+                                                  │   per-source instance)│
                                                   │                       │
-                                                  │  Routes by action:    │
-                                                  │  ┌──────────────────┐ │
-                                                  │  │ ACTION_RATE (2)  │ │
-                                                  │  │ → transactor     │ │
-                                                  │  └────────┬─────────┘ │
+                                                  │  ACTION_RATE (2) only │
+                                                  │  - stale checks       │
+                                                  │  - value ÷ 1e10       │
+                                                  │  - assetId → oracle   │
                                                   └───────────┼───────────┘
-                                                              │ calls
+                                                              │ same-chain call
                                                               ▼
-                                                  ┌───────────────────────┐       ┌────────────────────┐
-                                                  │  XcmTransactor        │       │                    │
-                                                  │  (UUPS Proxy, fresh   │  XCM  │  Hydration         │
-                                                  │   per-source instance)│──────►│  Parachain         │
-                                                  │                       │       │                    │
-                                                  │  - SCALE encoding     │       │  evm.call →        │
-                                                  │  - XCM precompile     │       │  Oracle.setPrice() │
-                                                  │    (0x0817)           │       │  (distinct MDA)    │
-                                                  │  - derived H160 addr  │       │                    │
-                                                  └───────────────────────┘       └────────────────────┘
+                                                  ┌───────────────────────┐
+                                                  │  ManagedOracle        │
+                                                  │  setPrice(int256)     │
+                                                  └───────────────────────┘
 ```
 
-The Moonbeam stack is the **same Solidity contracts** for both sources, but each source has its own deployed instance — distinct dispatcher proxy, distinct transactor proxy, distinct MDA on Hydration. Renunciation isolates them.
+Both sources deploy the **same Solidity**, but each gets its own `OracleReceiver` instance — its own
+authorized emitter and its own `assetId → oracle` map. Ownership is renounced per instance, so the
+two are isolated: an oracle serving both sources authorizes both receiver addresses.
 
 ## EVM contract hierarchy (shared between sources)
 
@@ -156,36 +151,29 @@ The Moonbeam stack is the **same Solidity contracts** for both sources, but each
 │                          │ extends                          │
 │                          ▼                                  │
 │              ┌───────────────────────┐                      │
-│              │  OracleDispatcher     │                      │
+│              │  OracleReceiver       │                      │
 │              │                       │                      │
 │              │  - Decode ABI payload │                      │
 │              │  - Route by action ID │                      │
-│              │  - Stale-check        │                      │
+│              │  - Monotonic stale    │                      │
+│              │    check per asset    │                      │
+│              │  - maxPriceAge bound  │                      │
 │              │  - 1e10 scaling       │                      │
 │              │  - Map assetId→oracle │                      │
 │              └───────────┬───────────┘                      │
-│                          │ calls                            │
+│                          │ calls (same chain)               │
 │                          ▼                                  │
 │              ┌───────────────────────┐                      │
-│              │  XcmTransactor        │                      │
-│              │                       │                      │
-│              │  - transact(to, data) │                      │
-│              │  - XCM msg assembly   │                      │
-│              │  - Auth: dispatcher   │                      │
+│              │  ManagedOracle        │                      │
+│              │  (Hydration-side,     │                      │
+│              │   not in this repo)   │                      │
+│              │  setPrice(int256)     │                      │
 │              └───────────────────────┘                      │
 └─────────────────────────────────────────────────────────────┘
-
-
- Utility libraries (contracts/src/utils/):
- ┌────────────────┐  ┌─────────────────┐  ┌──────────────┐
- │  ScaleCodec    │  │ DerivedAccount  │  │   Blake2b    │
- │                │  │                 │  │              │
- │ compact u32    │  │ H160 derivation │  │ blake2b-256  │
- │ compact u128   │  │ from XCM        │  │ for MDA      │
- │ LE u64/u256    │  │ multilocation   │  │ computation  │
- │ Vec<u8>        │  │ (child/sibling) │  │              │
- └────────────────┘  └─────────────────┘  └──────────────┘
 ```
+
+Delivery is one transaction on one chain: the same call that verifies the VAA writes the price. A
+failed write reverts the verification with it, so the VAA stays unconsumed and the relay can retry.
 
 ## Source emitter structure
 
@@ -280,24 +268,28 @@ The Moonbeam stack is the **same Solidity contracts** for both sources, but each
 
 ## Encoding pipeline (shared)
 
-Both sources produce a 128-byte payload with the same layout; Moonbeam decodes identically.
+Both sources produce a 128-byte payload with the same layout; the receiver decodes it identically.
 
 ```
-  Source (Solana or Ethereum)         Moonbeam                       Hydration
+  Source (Solana or Ethereum)              Hydration EVM
 
-  ┌─────────────┐    Wormhole     ┌──────────────┐   XCM         ┌──────────────┐
-  │ ABI encode: │    VAA          │ ABI decode:  │   message     │ SCALE decode │
-  │             │ ──────────────► │              │ ─────────────►│              │
-  │ action      │                 │ action       │               │ evm.call     │
-  │ assetId(b32)│                 │ assetId      │   SCALE enc:  │ → setPrice() │
-  │ value(u256) │                 │ value        │   - gas limit │              │
-  │  18-dec     │                 │  ÷ 1e10      │   - fee asset │              │
-  │ timestamp   │                 │  → 8-dec     │   - call data └──────────────┘
-  └─────────────┘                 └──────────────┘   - dest addr
-                                                     (Hydration
-                                                      oracle EVM
-                                                      contract)
+  ┌─────────────┐    Wormhole     ┌────────────────────┐
+  │ ABI encode: │    VAA          │ ABI decode:        │
+  │             │ ──────────────► │                    │
+  │ action      │                 │ action  (byte 31)  │
+  │ assetId(b32)│                 │ assetId            │
+  │ value(u256) │                 │ value ÷ 1e10       │
+  │  18-dec     │                 │   → 8-dec          │
+  │ timestamp   │                 │ vm.timestamp used  │
+  └─────────────┘                 │   for stale checks │
+                                  │         │          │
+                                  │         ▼          │
+                                  │ oracle.setPrice()  │
+                                  └────────────────────┘
 ```
+
+The payload `timestamp` is informational. Both stale checks use `vm.timestamp`, the VAA's guardian
+observation time: monotonic per asset, plus an absolute `maxPriceAge` bound (default 300s).
 
 ## Feed registration formats
 
@@ -361,19 +353,20 @@ OracleEmitter (Ethereum)
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          mrelayer                                           │
+│                                relayer                                      │
 │                                                                             │
-│  Polls Wormhole for signed VAAs from authorized emitters and submits        │
-│  them to OracleDispatcher.receiveMessage() on the per-source Moonbeam       │
-│  proxy.                                                                     │
+│  Submitting the signed VAA is permissionless. Needs an `oracle` feature     │
+│  in agents/relayer: subscribe to the source emitters, submit to the         │
+│  matching per-source receiver.                                              │
 │                                                                             │
-│  ┌──────────┐  poll signed VAA   ┌──────────────────┐                       │
-│  │ Wormhole │───────────────────►│   mrelayer       │──┐                    │
-│  └──────────┘                    └──────────────────┘  │                    │
+│  ┌──────────┐  signed VAA        ┌──────────────────┐                       │
+│  │ Wormhole │───────────────────►│   relayer        │──┐                    │
+│  └──────────┘                    │ (oracle feature) │  │                    │
+│                                  └──────────────────┘  │                    │
 │                                                        ▼                    │
-│                                       ┌───────────────────────────────────┐ │
-│                                       │  OracleDispatcher.receiveMessage  │ │
-│                                       │  (per-source proxy on Moonbeam)   │ │
-│                                       └───────────────────────────────────┘ │
+│                                    ┌──────────────────────────────────────┐ │
+│                                    │  OracleReceiver.receiveMessage       │ │
+│                                    │  (per-source instance on Hydration)  │ │
+│                                    └──────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
