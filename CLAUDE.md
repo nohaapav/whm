@@ -12,7 +12,7 @@ It lists available reference documents and their raw GitHub URLs.
 Cross-chain messaging infrastructure connecting EVM chains, Solana, and Hydration via Moonbeam. Three concerns:
 
 1. **On-chain contracts** — upgradeable Solidity (Foundry) on Base/Moonbeam/Hydration/Ethereum + an Anchor program on Solana.
-2. **Off-chain agents** — long-running TS services that publish/index/relay (`broadcaster`, `scan`, `mrelayer`).
+2. **Off-chain agents** — long-running TS services that publish/index/relay (`broadcaster`, `scan`, `relayer`).
 3. **Shared tooling** — a crash-safe migration runner, shared chain/wallet/args utilities, and the `migrations/` top-level orchestration.
 
 **Repo:** `galacticcouncil/whm`
@@ -82,7 +82,7 @@ agents/
   scan/                   # @whm/scan — multi-feature indexer (basejump, intents)
   nintent/                # @whm/nintent — intent deposit notifier (IntentForwarded → 1Click)
   quoter/                 # @whm/quoter — relay-fee quoter service
-  mrelayer/               # @whm/mrelayer — Wormhole VAA relayer
+  relayer/                # @whm/relayer — Wormhole VAA relayer (hydration-ntt, intent)
 
 common/                   # @whm/common — shared TS (evm, args, migration)
 
@@ -123,7 +123,7 @@ crates/solana
 agents/broadcaster
 agents/scan
 agents/quoter
-agents/mrelayer
+agents/relayer
 agents/nintent
 ```
 
@@ -152,7 +152,7 @@ Cross-platform glue lives at the **migration** layer and the **IDL/ABI sync** la
 - **Renounced ownership is the prod end-state.** Every prod-ready migration ends in `transfer-ownership@*` (to a real custodian) or `renounce@*` (to `0x0`). After the migration completes, the state file is the immutable audit record.
 - **Crash-safe.** State is persisted after each step. Resume by re-running the same command; reset a stage with `--from <step-name>`; pause early with `--pause-at <step-name>`.
 - **Upgradeable contracts.** Solidity inherits OZ UUPS upgradeable patterns. Initialization is done in migration steps, not constructors.
-- **Wormhole SDKs.** EVM uses `wormhole-solidity-sdk` (pinned via Soldeer). Solana uses Wormhole Core Bridge through Anchor. `mrelayer` agent uses `@wormhole-foundation/relayer-engine`.
+- **Wormhole SDKs.** EVM uses `wormhole-solidity-sdk` (pinned via Soldeer). Solana uses Wormhole Core Bridge through Anchor. `relayer` agent uses `@wormhole-foundation/relayer-engine`.
 - **Agent bundling.** `broadcaster`, `scan`, and `nintent` bundle to a single `dist/index.js` via esbuild (CJS, node platform; see [esbuild.config.mjs](esbuild.config.mjs)). Avoid top-level await / ESM-only constructs in their `src/`. Agents carry only runtime deps — esbuild, tsx, typescript, and dotenv come from the **root** package.json (see Workspace members).
 - **IDL sync.** `broadcaster` consumes the Solana program's IDL — `pnpm run sync-idl` in `agents/broadcaster/` copies `crates/solana/target/idl/oracle_emitter.json` and `crates/solana/target/types/oracle_emitter.ts` into `agents/broadcaster/src/emitter/`. Re-run after Solana program changes.
 - **Ops scripts.** `contracts/scripts/<feature>/` (EVM) and `crates/solana/scripts/<program>/` (Solana) hold one-shot `tsx`/`bash` entry points. They use the per-package `package.json` plus root `.env` for PKs.
@@ -217,7 +217,7 @@ Common scopes: `oracle`, `basejump`, `intents`, `scan`, `contracts`, `crates`, `
 | TS bundler          | esbuild (CJS, node platform — for agents)                                                               |
 | TS runner           | `tsx` for scripts; runner is `@whm/common/migration`                                                    |
 | EVM deps            | Soldeer (forge-std, OZ upgradeable, wormhole-solidity-sdk)                                              |
-| Wormhole            | `wormhole-solidity-sdk`, `@coral-xyz/anchor` (Solana), `@wormhole-foundation/relayer-engine` (mrelayer) |
+| Wormhole            | `wormhole-solidity-sdk`, `@coral-xyz/anchor` (Solana), `@wormhole-foundation/relayer-engine` (relayer) |
 | Polkadot interop    | `polkadot-api` (papi), `@galacticcouncil/descriptors`, `@galacticcouncil/common`                        |
 | Web/API             | Fastify + `@fastify/cors` (scan)                                                                      |
 | Database            | Postgres via `pg` (scan)                                                                              |
@@ -260,7 +260,7 @@ Common scopes: `oracle`, `basejump`, `intents`, `scan`, `contracts`, `crates`, `
 - **Oracle path (Ethereum source):** `OracleEmitter` on Ethereum → Wormhole → (parallel) `OracleDispatcher` proxy on Moonbeam → `XcmTransactor` → Hydration. Each source chain has its OWN dispatcher + transactor proxy pair (renounced ownership = no shared infra).
 - **Basejump path:** Source EVM `Basejump.sol` → Wormhole → `BasejumpProxy.sol` (Moonbeam) → `XcmTransactor` → `BasejumpLanding.sol` (Hydration). Fast-path is a separate signed VAA flow handled by `Basejump.completeTransfer`.
 - **Intents path (WTT, deployed):** `IntentEmitterWtt.sol` (Hydration) swaps the user's asset → WETH, then via XCM `batch_all` (reserve-transfer WETH+GLMR to its Moonbeam MDA + Transact-as-MDA) approves the Wormhole TokenBridge and calls `transferTokensWithPayload(WETH, …, IntentReceiver, payload=(intentId, depositAddress, maxRelayFee))` — a single payload-3 VAA. Off-chain `mrelayer` (app-intent) sizes a relay fee via `quoter` and calls `IntentReceiver.redeem(vaa, feeRequested)` on Ethereum → unwrap WETH → native ETH → pay relayer (≤ `maxRelayFee`) → forward to OneClick `depositAddress`; emits `IntentForwarded`. `nintent` then nudges OneClick. The shared abstract `IntentEmitter.sol` base differs only in the `_bridgeViaWormholeCall` hook; the **BJP** variant (`IntentEmitterBjp` → `BasejumpProxy` → `Basejump`/`BasejumpLandingNative` → `IntentRouter`) is the pooled fast-path alternative, not deployed for intents.
-- **Off-chain:** `broadcaster` reads Solana oracle state and signs `send_price` / `send_rate` instructions. `bjscan` indexes Basejump events from Moonbeam/Base/Hydration and exposes them via Fastify. `mrelayer` polls Wormhole for VAAs and submits them to receiver contracts.
+- **Off-chain:** `broadcaster` reads Solana oracle state and signs `send_price` / `send_rate` instructions. `bjscan` indexes Basejump events from Moonbeam/Base/Hydration and exposes them via Fastify. `relayer` polls Wormhole for VAAs and submits them to receiver contracts.
 - **Shared:** `@whm/common` exports `chains`, `ifs`, `wallet`, `args`, `migration`. Any change here affects all consumers.
 
 ### Validating changes

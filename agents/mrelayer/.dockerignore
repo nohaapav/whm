@@ -1,4 +1,0 @@
-node_modules/
-# The builder stage compiles from src/; copying local output in only lets stale entry points from
-# deleted apps survive into the image, since tsc does not prune what it no longer emits.
-build/

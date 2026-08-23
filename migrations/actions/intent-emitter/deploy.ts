@@ -3,13 +3,12 @@ import { encodeFunctionData } from "viem";
 import type { ifs } from "@whm/common/evm";
 import type { WalletContext } from "../types";
 
+import intentEmitterJson from "../../../contracts/out/IntentEmitter.sol/IntentEmitter.json";
 import erc1967ProxyJson from "../../../contracts/out/ERC1967Proxy.sol/ERC1967Proxy.json";
 
 export type DeployParams = WalletContext & {
-  /** Concrete emitter artifact to deploy (IntentEmitterWtt / IntentEmitterBjp) — the base is abstract. */
-  artifact: ifs.ContractArtifact;
-  /** Existing proxy to upgrade in place; omit for a fresh impl + ERC1967Proxy deploy. */
-  proxy?: `0x${string}`;
+  wormhole: `0x${string}`; // Wormhole core bridge on Hydration
+  proxy?: `0x${string}`; // when set, upgrade this existing proxy instead of deploying a new one
 };
 
 export type DeployResult = {
@@ -19,8 +18,8 @@ export type DeployResult = {
 };
 
 export async function deploy(params: DeployParams): Promise<DeployResult> {
-  const { publicClient, walletClient, account, artifact, proxy } = params;
-  const { abi, bytecode } = artifact;
+  const { publicClient, walletClient, account, wormhole, proxy } = params;
+  const { abi, bytecode } = intentEmitterJson as ifs.ContractArtifact;
 
   const implHash = await walletClient.deployContract({
     abi,
@@ -54,7 +53,7 @@ export async function deploy(params: DeployParams): Promise<DeployResult> {
   const initializeData = encodeFunctionData({
     abi,
     functionName: "initialize",
-    args: [],
+    args: [wormhole],
   });
 
   const { abi: proxyAbi, bytecode: proxyBytecode } = erc1967ProxyJson as ifs.ContractArtifact;

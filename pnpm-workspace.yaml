@@ -4,13 +4,18 @@ packages:
   - contracts
   - crates/solana
   - agents/broadcaster
+  - agents/relayer
   - agents/scan
   - agents/quoter
-  - agents/mrelayer
   - agents/nintent
 
 onlyBuiltDependencies:
   - esbuild
+
+overrides:
+  # Relayer engine -> @certusone/wormhole-sdk) asks for ts-types ^1.10.12, and pnpm resolves 1.20.12.
+  # Every installed @injectivelabs package is on 1.10.x, so pinning ts-types to match is the fix.
+  "@injectivelabs/ts-types": "1.10.12"
 
 packageExtensions:
   # Fix missing/transitive dependencies that are imported at runtime

@@ -22,12 +22,4 @@ export const hydration: ChainSpec = {
   paraId: 2034,
 };
 
-export const moonbeam: ChainSpec = {
-  key: "moonbeam",
-  name: "Moonbeam",
-  endpoint: ["wss://wss.api.moonbeam.network", "wss://moonbeam-rpc.dwellir.com"],
-  port: 8062,
-  paraId: 2004,
-};
-
-export const configs = { hydration, moonbeam } as const;
+export const configs = { hydration } as const;

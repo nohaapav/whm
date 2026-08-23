@@ -215,7 +215,7 @@ async function preflight(
  * IntentReceiver.processOrder — per-contract ops script for the Ethereum leg of intents v2.
  *
  * Takes the NTT settlement VAA and the emitter's forwarding instruction for the same manager
- * sequence, and runs the single on-chain step the live relayer (mrelayer/app-intent) performs:
+ * sequence, and runs the single on-chain step the live relayer (relayer, intent feature) performs:
  *
  *   processOrder(nttVaa, instructionVaa, feeRequested) → deliver the settlement through the
  *   transceiver (skipped if someone already did), pay msg.sender feeRequested, forward the rest to
