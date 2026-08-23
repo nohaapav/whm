@@ -19,7 +19,7 @@ contract XcmV4Test is Test {
         );
     }
 
-    // Asset { id: GLMR_LOCAL, fun: Fungible(1) }  (compact 1 = 0x04)
+    // Asset { id: some local PalletInstance location, fun: Fungible(1) }  (compact 1 = 0x04)
     function test_fungible_smallAmount() public pure {
         assertEq(XcmV4.fungible(hex"0001040a", 1), hex"0001040a" hex"00" hex"04");
     }

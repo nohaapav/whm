@@ -67,7 +67,8 @@ async function main(): Promise<void> {
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
   console.log("Approved:", approveHash);
 
-  // Wormhole message fee
+  // Both legs are paid from msg.value: the NTT settlement's delivery price and the fast-path
+  // message fee.
   const wormholeAddr = (await publicClient.readContract({
     address,
     abi,
@@ -84,19 +85,51 @@ async function main(): Promise<void> {
     },
   ] as const;
 
-  const fee = (await publicClient.readContract({
-    address: wormholeAddr,
-    abi: wormholeAbi,
-    functionName: "messageFee",
-  })) as bigint;
+  const nttManagerAbi = [
+    {
+      name: "quoteDeliveryPrice",
+      type: "function",
+      inputs: [
+        { name: "recipientChain", type: "uint16" },
+        { name: "transceiverInstructions", type: "bytes" },
+      ],
+      outputs: [
+        { name: "", type: "uint256[]" },
+        { name: "", type: "uint256" },
+      ],
+      stateMutability: "view",
+    },
+  ] as const;
 
-  // Bridge (destChain removed - Basejump now hardcodes MOONBEAM_WORMHOLE_ID)
+  const [messageFee, destChainId, manager] = (await Promise.all([
+    publicClient.readContract({
+      address: wormholeAddr,
+      abi: wormholeAbi,
+      functionName: "messageFee",
+    }),
+    publicClient.readContract({ address, abi, functionName: "DEST_CHAIN_ID" }),
+    publicClient.readContract({ address, abi, functionName: "nttManagerFor", args: [asset] }),
+  ])) as [bigint, number, `0x${string}`];
+
+  if (BigInt(manager) === 0n) throw new Error(`SettlementRouteNotSet — no NTT manager for ${asset}`);
+
+  const [, deliveryPrice] = (await publicClient.readContract({
+    address: manager,
+    abi: nttManagerAbi,
+    functionName: "quoteDeliveryPrice",
+    args: [destChainId, "0x00"],
+  })) as [bigint[], bigint];
+
+  const value = deliveryPrice + messageFee;
+  console.log(`  deliveryPrice=${deliveryPrice} messageFee=${messageFee} value=${value}`);
+
+  // Settles to the landing on Hydration (DEST_CHAIN_ID), then publishes the fast-path payout.
   const txHash = await walletClient.writeContract({
     address,
     abi,
     functionName: "bridgeViaWormhole",
     args: [asset, amount, recipient, "0x"],
-    value: fee,
+    value,
   });
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });

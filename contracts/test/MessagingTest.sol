@@ -35,7 +35,7 @@ contract MessagingTest is Test, MockWormhole {
     }
 
     function testSendMessage() public {
-        string memory message = "Hello from Moonbeam to Base!";
+        string memory message = "Hello from Hydration to Base!";
 
         uint256 estimatedCost = 1 ether;
         vm.deal(address(this), estimatedCost);
@@ -49,7 +49,7 @@ contract MessagingTest is Test, MockWormhole {
         bytes32 sourceAddr = bytes32(uint256(uint160(address(this))));
         receiverContract.setAuthorizedEmitter(sourceChain, sourceAddr);
 
-        string memory message = "Hello from Moonbeam to Base!";
+        string memory message = "Hello from Hydration to Base!";
         bytes memory payload = abi.encode(message);
         bytes memory vaa = abi.encode(sourceChain, sourceAddr, payload);
 

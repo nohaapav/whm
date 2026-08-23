@@ -38,9 +38,9 @@ contract HydrationRouterTest is Test {
     }
 
     function test_log_buy_realistic() public pure {
-        // buy 1 GLMR (asset 16, amount 1e18) paying asset 5, max_in 100e18
-        bytes memory call = HydrationRouter.encodeBuy(5, 16, 1e18, 100e18);
-        console2.log("router.buy(5 -> 16 GLMR, out 1e18, max 100e18):");
+        // buy 1 HOLLAR (asset 222, 18 dec, amount 1e18) paying asset 5, max_in 100e18
+        bytes memory call = HydrationRouter.encodeBuy(5, 222, 1e18, 100e18);
+        console2.log("router.buy(5 -> 222, out 1e18, max 100e18):");
         console2.logBytes(call);
     }
 }

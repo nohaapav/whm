@@ -54,8 +54,8 @@ contract MockERC20 {
 ///   Base      BasejumpEmitter.bridgeViaWormhole → NTT settlement (gross) + fast-path VAA (net)
 ///   Hydration BasejumpReceiver.completeTransfer → BasejumpLanding.transfer
 ///
-/// Two contracts, one per role: neither carries the other s entrypoints. No Moonbeam, no
-/// BasejumpProxy, no XcmTransactor, no TokenBridge.
+/// Two contracts, one per role: neither carries the other s entrypoints. Direct NTT, no
+/// intermediate proxy hop, no XcmTransactor, no TokenBridge.
 contract BasejumpIntegrationTest is Test, MockWormhole {
     using BasejumpTestHelpers for *;
 
@@ -380,7 +380,7 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
     }
 
     /// @notice Atomicity: a landing revert rolls the whole receiveMessage back, leaving the VAA
-    ///         unconsumed so the relayer can retry. The Moonbeam hop could not do this — it marked
+    ///         unconsumed so the relayer can retry. The old proxy hop could not do this — it marked
     ///         the VAA processed before knowing whether delivery landed.
     function testLandingRevertRollsBackProcessedVaa() public {
         bytes memory vaa = _vaa(TRANSFER_AMOUNT - BASEJUMP_FEE, 1);

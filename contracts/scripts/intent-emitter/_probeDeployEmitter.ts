@@ -3,7 +3,7 @@
  * real viem-signed eth transactions submitted as `pallet_ethereum::transact` (the
  * eth_sendRawTransaction path). Mirrors how hardhat/foundry deploy via the EVM RPC. Throwaway.
  *
- * v2 settles over NTT straight from Hydration — no XCM, no Moonbeam hop, no GLMR fee leg — so this
+ * v2 settles over NTT straight from Hydration — no XCM hop and no separate fee-asset leg — so this
  * only needs the one fork. Two Wormhole messages should come out of `placeOrder`: the transceiver's
  * settlement and the emitter's own forwarding instruction.
  *
