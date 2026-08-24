@@ -180,7 +180,7 @@ npx tsx scripts/basejump/completeTransfer.ts \
 
 #### Add route
 
-Authorize a corridor bridge (XcmTransactor MDA) and map a source-chain asset to its Hydration destination asset on the landing. Both calls are `onlyOwner` (Hydration TC); reads current state and prints the owner calldata for governance by default, or submits directly with `--send` if you hold the owner key (e.g. on a fork). Idempotent — skips whatever is already set.
+Authorize a corridor bridge (the `BasejumpReceiver` — one receiver serves every corridor, so this is a one-time call, not per corridor) and map a source-chain asset to its Hydration destination asset on the landing. Both calls are `onlyOwner` (Hydration TC); reads current state and prints the owner calldata for governance by default, or submits directly with `--send` if you hold the owner key (e.g. on a fork). Idempotent — skips whatever is already set.
 
 | Env variable | Description        |
 | ------------ | ------------------ |
@@ -190,7 +190,7 @@ Authorize a corridor bridge (XcmTransactor MDA) and map a source-chain asset to 
 | Flag        | Description                                                      |
 | ----------- | --------------------------------------------------------------- |
 | `--landing` | BasejumpLanding address (or `HYDRATION_LANDING` env)            |
-| `--bridge`  | Authorized bridge = XcmTransactor MDA (or `BRIDGE_MDA` env)     |
+| `--bridge`  | `BasejumpReceiver` address (or `BASEJUMP_RECEIVER_HYDRATION` env) |
 | `--source`  | Source-chain asset address (or `USDC_SOURCE_ASSET` env)         |
 | `--dest`    | Hydration destination asset (or `USDC_DEST_ASSET` env)          |
 | `--send`    | Submit directly (requires `PK_LANDING` / `PK` / `--pk` = owner) |

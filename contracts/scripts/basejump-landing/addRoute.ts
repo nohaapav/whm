@@ -7,9 +7,12 @@ import { ifs, wallet } from "@whm/common/evm";
 
 import basejumpLandingJson from "../../out/BasejumpLanding.sol/BasejumpLanding.json";
 
-// Add a Basejump route on the Hydration landing: authorize the corridor bridge (XcmTransactor MDA)
-// and map sourceAsset -> destAsset. Both are onlyOwner (Hydration TC). Prints calldata by default;
+// Add a Basejump route on the Hydration landing: authorize the corridor bridge and map
+// sourceAsset -> destAsset. Both are onlyOwner (Hydration TC). Prints calldata by default;
 // --send submits directly (requires the owner key via PK_LANDING / PK / --pk).
+//
+// The bridge is the BasejumpReceiver — one receiver serves every corridor, so it is authorized
+// once, not per corridor.
 
 const { optionalArg, requiredEnv } = args;
 const { getWallet } = wallet;
@@ -27,7 +30,7 @@ function getConfig() {
     rpcUrl: requiredEnv("RPC"),
     chainId: Number(requiredEnv("CHAIN_ID")),
     landing: addr("landing", optionalArg("--landing") || process.env.HYDRATION_LANDING),
-    bridge: addr("bridge", optionalArg("--bridge") || process.env.BRIDGE_MDA),
+    bridge: addr("bridge", optionalArg("--bridge") || process.env.BASEJUMP_RECEIVER_HYDRATION),
     sourceAsset: addr("source", optionalArg("--source") || process.env.USDC_SOURCE_ASSET),
     destAsset: addr("dest", optionalArg("--dest") || process.env.USDC_DEST_ASSET),
     send: process.argv.includes("--send"),
