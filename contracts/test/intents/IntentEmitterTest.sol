@@ -6,7 +6,6 @@ import {Vm} from "forge-std/Vm.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {IntentEmitter} from "../../src/intents/IntentEmitter.sol";
-import {IntentCodec} from "../../src/intents/IntentCodec.sol";
 import {IIntentEmitter} from "../../src/intents/interfaces/IIntentEmitter.sol";
 import {HydrationConsts} from "../../src/utils/hydration/HydrationConsts.sol";
 
@@ -74,14 +73,6 @@ contract MockCoreBridge {
     }
 }
 
-/// @dev The codec is a library, so its reverts are inlined into the caller rather than raised in a
-///      subcall — `expectRevert` needs a real call frame to catch. This is that frame.
-contract CodecHarness {
-    function decode(bytes memory terms) external pure returns (IIntentEmitter.Order memory) {
-        return IntentCodec.decodeOrder(terms);
-    }
-}
-
 /// @title IntentEmitterTest
 /// @notice Pins the three properties the design rests on:
 ///
@@ -110,16 +101,10 @@ contract IntentEmitterTest is Test {
     address public depositAddress = makeAddr("depositAddress");
     address public intentReceiver = makeAddr("intentReceiver");
     bytes32 public orderId = keccak256("schedule-1");
-    bytes32 public authPath;
 
     /// @dev Zero for most cases: the fee ceiling only matters where a test asserts on it, and a
     ///      non-zero default would have to be subtracted from every quantization assertion.
     uint256 constant MAX_RELAY_FEE = 0;
-
-    uint16 constant SLIPPAGE_BPS = 50;
-    uint8 constant KIND_WITHDRAW = 0;
-    string constant DEST_ASSET = "nep141:zec.omft.near";
-    string constant RECIPIENT = "t1KzZ3n1234567890abcdefghijkLMNOPQRS";
 
     function setUp() public {
         // Hydration exposes assets as ERC20 precompiles at fixed addresses, so the mocks have to
@@ -148,26 +133,11 @@ contract IntentEmitterTest is Test {
         emitter.setNttManager(address(nttManager));
         emitter.setIntentReceiver(intentReceiver);
 
-        (authPath,) = emitter.publishOrder(_order());
-
         vm.deal(user, 100 ether);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────
 
-    function _order() internal view returns (IIntentEmitter.Order memory) {
-        return IIntentEmitter.Order({
-            orderId: orderId,
-            maxSlippageBps: SLIPPAGE_BPS,
-            recipientKind: KIND_WITHDRAW,
-            destinationAsset: DEST_ASSET,
-            recipient: RECIPIENT
-        });
-    }
-
-    /// @dev Bridge WETH directly — assetIn == WETH skips the swap, so amounts are exact and the
-    ///      quantization assertions are unambiguous. The native credit mirrors what the ERC20
-    ///      transfer would also move on Hydration; see MockDispatch.
     function _bridge(uint256 amountIn, uint256 minEthOut) internal returns (uint64 sequence) {
         weth.mint(user, amountIn);
         vm.deal(address(emitter), address(emitter).balance + amountIn);
@@ -192,253 +162,11 @@ contract IntentEmitterTest is Test {
         vm.stopPrank();
     }
 
-    // ─── Wire-format readers (independent of the encoder) ───────────
-
-    function _u8(bytes memory b, uint256 o) internal pure returns (uint8) {
-        return uint8(b[o]);
-    }
-
-    function _u16(bytes memory b, uint256 o) internal pure returns (uint16) {
-        return uint16(uint8(b[o])) << 8 | uint16(uint8(b[o + 1]));
-    }
-
-    function _b32(bytes memory b, uint256 o) internal pure returns (bytes32 out) {
-        for (uint256 i = 0; i < 32; i++) {
-            out |= bytes32(uint256(uint8(b[o + i])) << (8 * (31 - i)));
-        }
-    }
-
-    function _str(bytes memory b, uint256 o, uint256 len) internal pure returns (string memory) {
-        bytes memory s = new bytes(len);
-        for (uint256 i = 0; i < len; i++) {
-            s[i] = b[o + i];
-        }
-        return string(s);
-    }
-
-    /// @dev The `min_amount_out` the emitter handed `router.sell`. SCALE: pallet(1) call(1)
-    ///      assetIn(4) assetOut(4) amountIn(16) minAmountOut(16), all little-endian.
     function _routerFloor() internal view returns (uint256 floor) {
         bytes memory call = dispatch.lastCall();
         for (uint256 i = 0; i < 16; i++) {
             floor |= uint256(uint8(call[26 + i])) << (8 * i);
         }
-    }
-
-    // ─── Order authorization ────────────────────────────────────────
-
-    /// @notice The router decodes this by offset and trusts every field, so the layout is a
-    ///         contract in itself. Read back field by field rather than by re-encoding.
-    function testOrderPayloadWireFormat() public view {
-        bytes memory p = coreBridge.lastPayload();
-
-        assertEq(_u8(p, 0), 1, "version");
-        assertEq(_b32(p, 1), orderId, "orderId");
-        assertEq(_u16(p, 33), SLIPPAGE_BPS, "maxSlippageBps");
-        assertEq(_u8(p, 35), KIND_WITHDRAW, "recipientKind");
-
-        uint256 assetLen = _u8(p, 36);
-        assertEq(assetLen, bytes(DEST_ASSET).length, "destAssetLen");
-        assertEq(_str(p, 37, assetLen), DEST_ASSET, "destinationAsset");
-
-        uint256 recipientLen = _u8(p, 37 + assetLen);
-        assertEq(recipientLen, bytes(RECIPIENT).length, "recipientLen");
-        assertEq(_str(p, 38 + assetLen, recipientLen), RECIPIENT, "recipient");
-
-        // Declared lengths must account for the whole buffer — a payload the router could
-        // truncate rather than reject is a payload with a second reading.
-        assertEq(p.length, 38 + assetLen + recipientLen, "trailing bytes");
-    }
-
-    /// @notice The view the off-chain deriver and the router's decoder are pinned against. Bytes
-    ///         rather than a hash, so a divergence names the field instead of just failing.
-    function testComputeTermsMatchesThePublishedPayload() public view {
-        assertEq(emitter.computeTerms(_order()), coreBridge.lastPayload(), "terms must be the payload");
-    }
-
-    /// @notice Round-trips through the decoder the router has to reimplement. What the emitter
-    ///         encodes must be recoverable field for field, or the two ends disagree about an order
-    ///         while both believing they parsed it.
-    function testTermsRoundTripThroughTheDecoder() public view {
-        IIntentEmitter.Order memory o = IntentCodec.decodeOrder(coreBridge.lastPayload());
-
-        assertEq(o.orderId, orderId, "orderId");
-        assertEq(o.maxSlippageBps, SLIPPAGE_BPS, "maxSlippageBps");
-        assertEq(o.recipientKind, KIND_WITHDRAW, "recipientKind");
-        assertEq(o.destinationAsset, DEST_ASSET, "destinationAsset");
-        assertEq(o.recipient, RECIPIENT, "recipient");
-    }
-
-    /// @notice A buffer whose declared lengths do not sum to it exactly has a second reading, and
-    ///         two different orders could hash from it. Reject rather than truncate.
-    function testDecoderRejectsMalformedTerms() public {
-        CodecHarness harness = new CodecHarness();
-        bytes memory p = coreBridge.lastPayload();
-
-        bytes memory truncated = new bytes(p.length - 1);
-        for (uint256 i = 0; i < truncated.length; i++) {
-            truncated[i] = p[i];
-        }
-        vm.expectRevert(
-            abi.encodeWithSelector(IntentCodec.MalformedTerms.selector, truncated.length)
-        );
-        harness.decode(truncated);
-
-        bytes memory padded = abi.encodePacked(p, hex"00");
-        vm.expectRevert(
-            abi.encodeWithSelector(IntentCodec.MalformedTerms.selector, padded.length)
-        );
-        harness.decode(padded);
-
-        p[0] = 0x02;
-        vm.expectRevert(abi.encodeWithSelector(IntentCodec.InvalidVersion.selector, 2));
-        harness.decode(p);
-    }
-
-    /// @notice Published instantly. Finality buys nothing here: the path binds the order to its own
-    ///         recipient, so a reorged-away authorization derives an account nobody funded.
-    function testOrderPublishedInstant() public view {
-        assertEq(coreBridge.lastConsistency(), 200, "authorization must publish instantly");
-    }
-
-    /// @notice The path is the hash of exactly the bytes the router receives — no prefix, no suffix,
-    ///         nothing sliced off. Anything else and the router derives a different account than the
-    ///         publisher computed, and deposits land somewhere nothing can reach.
-    function testAuthPathIsTheHashOfTheWholePayload() public view {
-        assertEq(authPath, keccak256(coreBridge.lastPayload()), "path must hash the payload in full");
-        assertEq(authPath, emitter.computeAuthPath(_order()), "view must agree with publish");
-    }
-
-    /// @notice The property the whole design rests on. Every field that decides where funds may go
-    ///         is inside the hash, so no authorization can reach an account it was not derived to
-    ///         reach — there is simply no VAA that hashes to someone else's path while naming your
-    ///         recipient.
-    function testAuthPathBindsEveryDestinationField() public view {
-        IIntentEmitter.Order memory o = _order();
-
-        // Same length as RECIPIENT on purpose: a shorter one would differ by its length prefix,
-        // which would let this assertion pass even with the bytes themselves outside the hash.
-        o.recipient = "t1AttackerZZZZZZZZZZZZZZZZZZZZZZZZZZ";
-        assertEq(bytes(o.recipient).length, bytes(RECIPIENT).length, "lengths must match to bind bytes");
-        assertTrue(emitter.computeAuthPath(o) != authPath, "recipient must bind");
-
-        o = _order();
-        o.destinationAsset = "nep141:btc.omft.near";
-        assertEq(bytes(o.destinationAsset).length, bytes(DEST_ASSET).length, "lengths must match");
-        assertTrue(emitter.computeAuthPath(o) != authPath, "destinationAsset must bind");
-
-        o = _order();
-        o.recipientKind = 1;
-        assertTrue(emitter.computeAuthPath(o) != authPath, "recipientKind must bind");
-
-        // Not cosmetic: if slippage were outside the hash, anyone could publish a wide-open order
-        // for someone else's (asset, recipient) and have the balance drained at a rate a colluding
-        // solver picked. In the hash, a looser tolerance is a different account entirely.
-        o = _order();
-        o.maxSlippageBps = 5000;
-        assertTrue(emitter.computeAuthPath(o) != authPath, "maxSlippageBps must bind");
-
-        // The one field the router assigns no meaning to still has to bind, because that is the only
-        // thing making account ↔ schedule a bijection: two schedules to the same recipient must not
-        // share a balance, or the bot's per-account lock has to span them.
-        o = _order();
-        o.orderId = keccak256("schedule-2");
-        assertTrue(emitter.computeAuthPath(o) != authPath, "orderId must bind");
-    }
-
-    /// @notice Length prefixes are what keep the hash unambiguous — without them ("ab","c") and
-    ///         ("a","bc") would derive the same account, and either recipient could drain the other.
-    function testAuthPathIsUnambiguousAcrossFieldBoundaries() public view {
-        IIntentEmitter.Order memory a = _order();
-        a.destinationAsset = "ab";
-        a.recipient = "c";
-
-        IIntentEmitter.Order memory b = _order();
-        b.destinationAsset = "a";
-        b.recipient = "bc";
-
-        assertTrue(
-            emitter.computeAuthPath(a) != emitter.computeAuthPath(b), "concatenation is ambiguous"
-        );
-    }
-
-    /// @notice Who publishes carries no authority, which is why there is no id to claim and no
-    ///         namespace to defend. An attacker publishing the victim's terms just reproduces the
-    ///         victim's own authorization; publishing their own recipient reaches their own account.
-    function testPublisherHasNoAuthority() public {
-        address attacker = makeAddr("attacker");
-
-        vm.prank(attacker);
-        (bytes32 same,) = emitter.publishOrder(_order());
-        assertEq(same, authPath, "identical terms must derive the same account");
-
-        IIntentEmitter.Order memory theirs = _order();
-        theirs.recipient = "t1AttackerAddress00000000000000000";
-
-        vm.prank(attacker);
-        (bytes32 other,) = emitter.publishOrder(theirs);
-        assertTrue(other != authPath, "attacker reached the victim's account");
-    }
-
-    /// @notice Nothing is stored, so republishing is a no-op worth having: if a VAA's signatures
-    ///         are ever unavailable, publish the same terms again and get the same message.
-    function testRepublishIsHarmless() public {
-        (bytes32 again,) = emitter.publishOrder(_order());
-
-        assertEq(again, authPath, "same terms must republish to the same path");
-        assertEq(coreBridge.lastPayload().length, 38 + bytes(DEST_ASSET).length + bytes(RECIPIENT).length);
-    }
-
-    /// @notice Native here is WETH — the same balance the contract holds as an ERC20 — so an
-    ///         approximate fee would be paid out of swap dust instead of the caller's pocket.
-    function testPublishOrderRequiresExactMessageFee() public {
-        coreBridge.setFee(1000);
-        vm.deal(address(this), 1 ether);
-
-        vm.expectRevert(abi.encodeWithSelector(IIntentEmitter.InvalidMessageFee.selector, 1000, 0));
-        emitter.publishOrder(_order());
-
-        vm.expectRevert(abi.encodeWithSelector(IIntentEmitter.InvalidMessageFee.selector, 1000, 1001));
-        emitter.publishOrder{value: 1001}(_order());
-
-        emitter.publishOrder{value: 1000}(_order());
-        assertEq(coreBridge.lastValue(), 1000, "fee must reach the core bridge");
-    }
-
-    function testPublishOrderValidatesTerms() public {
-        IIntentEmitter.Order memory o = _order();
-
-        // Zero is what an uninitialized client field looks like.
-        o.orderId = bytes32(0);
-        vm.expectRevert(IntentCodec.InvalidOrderId.selector);
-        emitter.publishOrder(o);
-
-        o = _order();
-        o.recipientKind = 2;
-        vm.expectRevert(abi.encodeWithSelector(IntentCodec.InvalidRecipientKind.selector, 2));
-        emitter.publishOrder(o);
-
-        o = _order();
-        o.destinationAsset = "";
-        vm.expectRevert(abi.encodeWithSelector(IntentCodec.InvalidDestinationAsset.selector, 0));
-        emitter.publishOrder(o);
-
-        // Both strings carry a single length byte on the wire, so 256 would wrap to zero.
-        o = _order();
-        o.recipient = new string(256);
-        vm.expectRevert(abi.encodeWithSelector(IntentCodec.InvalidRecipient.selector, 256));
-        emitter.publishOrder(o);
-    }
-
-    /// @notice Terms the router would reject must not cost a Wormhole message fee.
-    function testInvalidTermsRevertBeforeTheFeeCheck() public {
-        coreBridge.setFee(1000);
-
-        IIntentEmitter.Order memory o = _order();
-        o.orderId = bytes32(0);
-
-        vm.expectRevert(IntentCodec.InvalidOrderId.selector);
-        emitter.publishOrder(o);
     }
 
     // ─── Self-funded delivery ───────────────────────────────────────

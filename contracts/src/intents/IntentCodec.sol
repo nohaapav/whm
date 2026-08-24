@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import {IIntentEmitter} from "./interfaces/IIntentEmitter.sol";
+import {IIntentQuoteEmitter} from "./interfaces/IIntentQuoteEmitter.sol";
 
-/// @title IntentCodec — the order wire format
+/// @title IntentCodec — the quote wire format
 /// @notice Packed big-endian. The payload IS the terms, so the NEAR router hashes what it received
 ///         in full. Packed rather than ABI because the decoder is Rust. Layout and rationale:
 ///         docs/intents/schema.md §2.
 ///
 ///           offset  size  field          offset  size  field
 ///                0     1  version            36     1  destAssetLen (D)
-///                1    32  orderId            37     D  destinationAsset
+///                1    32  quoteId            37     D  destinationAsset
 ///               33     2  maxSlippageBps   37+D     1  recipientLen (R)
 ///               35     1  recipientKind    38+D     R  recipient      total 38 + D + R
-///
-/// @dev Not under `utils/hydration/` — nothing here is Hydration-specific, and a second source chain
-///      would share it unchanged.
 library IntentCodec {
     /// @notice Wire version. Inside the hash, so a future layout derives disjoint accounts.
     uint8 internal constant VERSION = 1;
@@ -29,7 +26,7 @@ library IntentCodec {
     /// @dev Fixed prefix through `destAssetLen`, i.e. everything before the first string.
     uint256 internal constant ORDER_HEADER_SIZE = 37;
 
-    error InvalidOrderId();
+    error InvalidQuoteId();
     error InvalidRecipientKind(uint8 kind);
     error InvalidDestinationAsset(uint256 length);
     error InvalidRecipient(uint256 length);
@@ -37,28 +34,28 @@ library IntentCodec {
     /// @dev Declared lengths do not account for the buffer exactly.
     error MalformedTerms(uint256 length);
 
-    // ─── Order ───────────────────────────────────────────────────
+    // ─── Quote ───────────────────────────────────────────────────
 
     /// @notice The MPC derivation path a set of terms hashes to.
-    function authPath(IIntentEmitter.Order calldata o) internal pure returns (bytes32) {
-        return keccak256(encodeOrder(o));
+    function authPath(IIntentQuoteEmitter.Quote calldata o) internal pure returns (bytes32) {
+        return keccak256(encodeQuote(o));
     }
 
-    /// @notice Encode an order's terms — the exact bytes published, and the preimage of its path.
+    /// @notice Encode a quote's terms — the exact bytes published, and the preimage of its path.
     /// @dev Length bounds live here rather than at the call site, so no caller can obtain an
     ///      ambiguous hash: over 255 wraps to zero through the `uint8` cast.
-    function encodeOrder(IIntentEmitter.Order calldata o) internal pure returns (bytes memory) {
+    function encodeQuote(IIntentQuoteEmitter.Quote calldata o) internal pure returns (bytes memory) {
         bytes memory asset = bytes(o.destinationAsset);
         bytes memory recipient = bytes(o.recipient);
 
-        if (o.orderId == bytes32(0)) revert InvalidOrderId();
+        if (o.quoteId == bytes32(0)) revert InvalidQuoteId();
         if (o.recipientKind > KIND_INTENTS_ACCOUNT) revert InvalidRecipientKind(o.recipientKind);
         if (asset.length == 0 || asset.length > 255) revert InvalidDestinationAsset(asset.length);
         if (recipient.length == 0 || recipient.length > 255) revert InvalidRecipient(recipient.length);
 
         return abi.encodePacked(
             VERSION,
-            o.orderId,
+            o.quoteId,
             o.maxSlippageBps,
             o.recipientKind,
             uint8(asset.length),
@@ -68,10 +65,10 @@ library IntentCodec {
         );
     }
 
-    /// @notice Parse published terms back into an order — the mirror of the router's decoder.
-    /// @dev Rejects rather than truncates: a buffer two different orders could hash from is not one
+    /// @notice Parse published terms back into a quote — the mirror of the router's decoder.
+    /// @dev Rejects rather than truncates: a buffer two different quotes could hash from is not one
     ///      to read the first of.
-    function decodeOrder(bytes memory terms) internal pure returns (IIntentEmitter.Order memory o) {
+    function decodeQuote(bytes memory terms) internal pure returns (IIntentQuoteEmitter.Quote memory o) {
         if (terms.length < ORDER_HEADER_SIZE) revert MalformedTerms(terms.length);
         if (uint8(terms[0]) != VERSION) revert InvalidVersion(uint8(terms[0]));
 
@@ -86,16 +83,16 @@ library IntentCodec {
         // Read the second length only after the first string, and hold the total to both.
         if (terms.length != recipientLenOffset + 1 + recipientLen) revert MalformedTerms(terms.length);
 
-        bytes32 orderId;
+        bytes32 quoteId;
         for (uint256 i = 0; i < 32; i++) {
-            orderId |= bytes32(uint256(uint8(terms[1 + i])) << (8 * (31 - i)));
+            quoteId |= bytes32(uint256(uint8(terms[1 + i])) << (8 * (31 - i)));
         }
 
         uint8 recipientKind = uint8(terms[35]);
         if (recipientKind > KIND_INTENTS_ACCOUNT) revert InvalidRecipientKind(recipientKind);
 
-        o = IIntentEmitter.Order({
-            orderId: orderId,
+        o = IIntentQuoteEmitter.Quote({
+            quoteId: quoteId,
             maxSlippageBps: uint16(uint8(terms[33])) << 8 | uint16(uint8(terms[34])),
             recipientKind: recipientKind,
             destinationAsset: string(_slice(terms, ORDER_HEADER_SIZE, assetLen)),

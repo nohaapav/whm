@@ -17,6 +17,8 @@
     "migrate:oracle-relay-ethereum:fork": "bash sh/migrate-oracle-relay-ethereum.sh fork",
     "migrate:intent": "bash sh/migrate-intent.sh prod",
     "migrate:intent:fork": "bash sh/migrate-intent.sh fork",
+    "migrate:intent-quote-emitter": "bash sh/migrate-intent-quote-emitter.sh prod",
+    "migrate:intent-quote-emitter:fork": "bash sh/migrate-intent-quote-emitter.sh fork",
     "print:oracles": "bash sh/print-oracles.sh"
   },
   "dependencies": {

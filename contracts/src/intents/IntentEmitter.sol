@@ -13,17 +13,14 @@ import {HydrationConsts} from "../utils/hydration/HydrationConsts.sol";
 import {HydrationRouter} from "../utils/hydration/HydrationRouter.sol";
 
 import {IIntentEmitter} from "./interfaces/IIntentEmitter.sol";
-import {IntentCodec} from "./IntentCodec.sol";
 
 /// @title IntentEmitter — Hydration → Ethereum entry point for NEAR-Intents bridging
-/// @notice Funds and authorization travel separately and meet on NEAR. Two stateless entry points:
+/// @notice One stateless entry point: `placeOrder` sells A for WETH and settles it to an Ethereum
+///         address over NTT, publishing the forwarding instruction beside it.
 ///
-///           1. VALUE   — placeOrder: sell A for WETH, settle it to an Ethereum address over NTT.
-///           2. MESSAGE — publishOrder: publish the order terms the NEAR router reads `recipient`
-///                        from. Standing, so it is published once per route, not per order.
-///
-///         The derivation path is the hash of the terms, so an authorization can only ever reach the
-///         account its own recipient implies. See docs/intents/{spec,schema}.md.
+///         The address it settles toward is `depositAddress`, and this contract has no opinion about
+///         where it came from — a `IntentQuoteEmitter` quote derives one, a 1Click quote issues one,
+///         and both are served by the same call. See docs/intents/{spec,schema}.md.
 ///
 /// @dev Placing an order needs nothing from off-chain: the rail's delivery price comes out of the swap
 ///      output, which works because Hydration's native currency is WETH.
@@ -62,41 +59,6 @@ contract IntentEmitter is Initializable, UUPSUpgradeable, IIntentEmitter {
     function initialize(address _wormhole) public initializer {
         wormhole = IWormhole(_wormhole);
         owner = msg.sender;
-    }
-
-    // ─── Authorization ───────────────────────────────────────────
-
-        /// @inheritdoc IIntentEmitter
-    function publishOrder(Order calldata order)
-        external
-        payable
-        returns (bytes32 authPath, uint64 messageSequence)
-    {
-        bytes memory payload = IntentCodec.encodeOrder(order);
-
-        uint256 fee = wormhole.messageFee();
-        if (msg.value != fee) revert InvalidMessageFee(fee, msg.value);
-
-        authPath = keccak256(payload);
-
-        messageSequence = wormhole.publishMessage{value: fee}(
-            emitterNonce,
-            payload,
-            CONSISTENCY_INSTANT
-        );
-        emitterNonce++;
-
-        emit OrderPublished(authPath, msg.sender, order.orderId, order.recipient, messageSequence);
-    }
-
-    /// @inheritdoc IIntentEmitter
-    function computeAuthPath(Order calldata order) external pure returns (bytes32) {
-        return IntentCodec.authPath(order);
-    }
-
-    /// @inheritdoc IIntentEmitter
-    function computeTerms(Order calldata order) external pure returns (bytes memory) {
-        return IntentCodec.encodeOrder(order);
     }
 
     // ─── Core ────────────────────────────────────────────────────

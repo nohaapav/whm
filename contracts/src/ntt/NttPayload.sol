@@ -33,4 +33,23 @@ library NttPayload {
         (id, offset) = payload.asBytes32Unchecked(offset);
         return uint64(uint256(id));
     }
+
+    /// @notice The manager message a settlement carries — the preimage NTT digests delivery on.
+    /// @param payload A Wormhole transceiver VAA's payload.
+    function managerMessage(bytes memory payload) internal pure returns (bytes memory message) {
+        uint256 offset = 0;
+
+        bytes4 prefix;
+        (prefix, offset) = payload.asBytes4Unchecked(offset);
+        if (prefix != WH_TRANSCEIVER_PAYLOAD_PREFIX) revert InvalidPrefix(prefix);
+
+        (, offset) = payload.asBytes32Unchecked(offset); // sourceNttManagerAddress
+        (, offset) = payload.asBytes32Unchecked(offset); // recipientNttManagerAddress
+
+        uint16 length;
+        (length, offset) = payload.asUint16Unchecked(offset);
+
+        // Checked: the length prefix comes from bytes `parseVM` has not verified.
+        (message,) = payload.slice(offset, length);
+    }
 }

@@ -45,6 +45,9 @@ interface IIntentReceiver {
     /// @dev The settlement has not landed yet, or an earlier instruction took what had. Reverting
     ///      leaves this instruction executable, so it waits for the next arrival.
     error NotFunded(uint256 required, uint256 available);
+    /// @dev The settlement was delivered but its funds have not been released — NTT's inbound rate
+    ///      limiter holds it queued. Reverting leaves the instruction executable for retry.
+    error SettlementNotReleased(uint64 sequence);
     error FeeExceedsCeiling();
     error AlreadyRedeemed();
 

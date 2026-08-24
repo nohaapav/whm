@@ -5,7 +5,7 @@ import { isAddress, isHex, parseEventLogs } from "viem";
 import { args } from "@whm/common";
 import { ifs, wallet } from "@whm/common/evm";
 
-import intentEmitterJson from "../../out/IntentEmitter.sol/IntentEmitter.json";
+import quoteEmitterJson from "../../out/IntentQuoteEmitter.sol/IntentQuoteEmitter.json";
 
 const { requiredArg, optionalArg, requiredEnv } = args;
 const { getWallet } = wallet;
@@ -18,16 +18,16 @@ function getConfig() {
   const chainId = requiredEnv("CHAIN_ID");
 
   const privateKey = requiredArg("--pk");
-  const address = requiredArg("--address"); // IntentEmitter proxy
-  const orderId = requiredArg("--orderId"); // bytes32 namespace, unique per schedule
+  const address = requiredArg("--address"); // IntentQuoteEmitter proxy
+  const quoteId = requiredArg("--quoteId"); // bytes32 namespace, unique per schedule
   const destinationAsset = requiredArg("--destinationAsset"); // e.g. nep141:zec.omft.near
   const recipient = requiredArg("--recipient"); // final destination — what the path protects
   const maxSlippageBps = Number(optionalArg("--maxSlippageBps") ?? "50");
   const kindArg = (optionalArg("--recipientKind") ?? "withdraw") as keyof typeof KINDS;
 
-  if (!isAddress(address)) throw new Error("Invalid --address (IntentEmitter).");
-  if (!isHex(orderId) || orderId.length !== 66)
-    throw new Error("Invalid --orderId (expected bytes32).");
+  if (!isAddress(address)) throw new Error("Invalid --address (IntentQuoteEmitter).");
+  if (!isHex(quoteId) || quoteId.length !== 66)
+    throw new Error("Invalid --quoteId (expected bytes32).");
   if (!(kindArg in KINDS))
     throw new Error(`Invalid --recipientKind: ${kindArg} (withdraw | account).`);
   if (!Number.isInteger(maxSlippageBps) || maxSlippageBps < 0 || maxSlippageBps > 65535)
@@ -41,7 +41,7 @@ function getConfig() {
     privateKey: privateKey as `0x${string}`,
     address: address as `0x${string}`,
     order: {
-      orderId: orderId as `0x${string}`,
+      quoteId: quoteId as `0x${string}`,
       maxSlippageBps,
       recipientKind: KINDS[kindArg],
       destinationAsset,
@@ -63,11 +63,11 @@ const wormholeAbi = [
 async function main(): Promise<void> {
   const cfg = getConfig();
   const { publicClient, walletClient, account } = getWallet(cfg.rpcUrl, cfg.chainId, cfg.privateKey);
-  const { abi } = intentEmitterJson as ifs.ContractArtifact;
+  const { abi } = quoteEmitterJson as ifs.ContractArtifact;
 
   console.log("IntentEmitter:  ", cfg.address);
   console.log("publisher:      ", account.address);
-  console.log("orderId:        ", cfg.order.orderId);
+  console.log("quoteId:        ", cfg.order.quoteId);
   console.log("destinationAsset:", cfg.order.destinationAsset);
   console.log("recipient:      ", cfg.order.recipient);
   console.log("recipientKind:  ", cfg.order.recipientKind);
@@ -109,16 +109,16 @@ async function main(): Promise<void> {
   const hash = await walletClient.writeContract({
     address: cfg.address,
     abi,
-    functionName: "publishOrder",
+    functionName: "publishQuote",
     args: [cfg.order],
     value: fee,
   });
-  console.log("publishOrder tx:", hash);
+  console.log("publishQuote tx:", hash);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   console.log("status:", receipt.status, "block:", receipt.blockNumber);
 
   const published = parseEventLogs({ abi, eventName: "OrderPublished", logs: receipt.logs })[0];
-  if (!published) throw new Error("publishOrder succeeded but no OrderPublished event.");
+  if (!published) throw new Error("publishQuote succeeded but no OrderPublished event.");
   const ev = published.args as { authPath: string; messageSequence: bigint };
   if (ev.authPath !== authPath) {
     throw new Error(`authPath mismatch: computed ${authPath}, emitted ${ev.authPath}`);

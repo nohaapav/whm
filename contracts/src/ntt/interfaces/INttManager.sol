@@ -32,4 +32,24 @@ interface INttManager {
     function isPaused() external view returns (bool);
 
     function getCurrentOutboundCapacity() external view returns (uint256);
+
+    /// @notice A transfer held by the inbound rate limiter.
+    /// @dev `amount` is NTT's `TrimmedAmount`; declared as its underlying `uint72` so the ABI decode
+    ///      matches without importing NTT's value type.
+    struct InboundQueuedTransfer {
+        uint72 amount;
+        uint64 txTimestamp;
+        address recipient;
+    }
+
+    /// @notice Whether the manager executed a message. Set before the rate limiter runs, so it is
+    ///         true for a queued transfer as well as a released one.
+    function isMessageExecuted(bytes32 digest) external view returns (bool);
+
+    /// @notice The inbound queue entry for a message. `txTimestamp` is zero when none is held —
+    ///         `completeInboundQueuedTransfer` deletes the entry before it releases.
+    function getInboundQueuedTransfer(bytes32 digest)
+        external
+        view
+        returns (InboundQueuedTransfer memory);
 }

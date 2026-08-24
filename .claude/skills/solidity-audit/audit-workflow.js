@@ -12,14 +12,24 @@ export const meta = {
 
 const BUNDLE = '<ABSOLUTE_PATH_TO_BUNDLE_DIR>' // e.g. /Users/.../whm/.audit-abc123
 
+// Keep in sync with the "Repo-specific context" section of SKILL.md.
 const REPO_CONTEXT =
-  'The system is a cross-chain bridge built on Wormhole + Moonbeam XCM. Dependency contracts you MAY Read ' +
-  'for context live under contracts/src/utils/{hydration,moonbeam}, contracts/src/utils, and ' +
-  'contracts/src/basejump. Highest-value seams: (a) asset-address convention — BasejumpLandingNative ' +
-  'forwards the payload sourceAsset verbatim as the DEST-chain ERC20, so hardcoding a SOURCE-chain token ' +
-  'address mismatches on the destination; (b) XCM Transact legs are fire-and-forget — the DISPATCH ' +
-  'precompile confirms only the local call, a remote Moonbeam leg can fail and strand funds at the derived ' +
-  'MDA; (c) amounts are SCALE-encoded as uint128 (HydrationRouter, XcmV4.fungible) — watch truncation.'
+  'Every corridor is a DIRECT two-chain hop: source EVM -> Wormhole -> destination. There is no Moonbeam ' +
+  'and no XCM Transact leg anywhere — an older design had one, it is deleted; do not reason about it. ' +
+  'Hydration is EVM-on-Substrate: Wormhole chain id 73, EVM chain id 222222, para id 2034; ERC20s are ' +
+  'asset-id precompiles at 0x0100000000 | assetId; the DISPATCH precompile (0x…0401) runs a SCALE-encoded ' +
+  'runtime call AS THE CALLING CONTRACT via a raw .call that reports success for the LOCAL dispatch only; ' +
+  'recipients are AccountId32 (bytes32); amounts are SCALE-encoded at uint128 width — watch truncation. ' +
+  'Wormhole: parseAndVerifyVM checks guardian signatures ONLY, so the caller must check the emitter; ' +
+  'relaying is permissionless (any address, any order, any delay); vm.timestamp is the source-block time. ' +
+  'NTT v2 is the settlement rail: the 3-arg transfer overload hardcodes shouldQueue=false so a paused rail ' +
+  'or rate-limit breach reverts, and _trimTransferAmount REVERTS with TransferAmountHasDust rather than ' +
+  'truncating, trimming to 8 decimals. Dependency source you MAY Read: contracts/src/ntt/, ' +
+  'contracts/src/utils/, contracts/src/*/interfaces/, contracts/test/, contracts/dependencies/. ' +
+  'DESIGN DECISIONS — do NOT report these as findings: consistency level 200 (instant publish is ' +
+  'deliberate and reorg exposure is accepted risk, bounded by the NTT outbound rate limit); a ' +
+  'permissionless OracleEmitter.send (the caller triggers a read and cannot choose its result); ' +
+  'permissionless relaying generally; renouncing receiver ownership as the prod end-state.'
 
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['findings', 'leads'],

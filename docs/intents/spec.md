@@ -20,8 +20,8 @@ beyond the shared transport is required. Implemented.
 **MPC-derived.** The deposit address is derived — `path → A → 0xN` — and is permanent, deterministic,
 and reusable for every fill. One user signature at schedule creation covers all of them; the rate
 floor is enforced per fill on NEAR instead of being frozen up front. Costs two extra pieces:
-`publishOrder` on Hydration and `IntentRouter` on NEAR. The Hydration side is implemented; the router
-is not built.
+`IntentQuoteEmitter` on Hydration and `IntentRouter` on NEAR. The Hydration side is implemented; the
+router is not built.
 
 Everything up to and including the Ethereum forward is **shared** — see
 [Shared transport](#shared-transport) below.
@@ -71,7 +71,7 @@ ETHEREUM    IntentReceiver.processOrder(nttVaa, instructionVaa, feeRequested)
 ```
 
 **Why two messages and not one.** The Wormhole TokenBridge's `transferTokensWithPayload` carries a
-payload *and* restricts redemption to the named recipient. NTT does neither: it has no payload field,
+payload _and_ restricts redemption to the named recipient. NTT does neither: it has no payload field,
 and `receiveMessage` is permissionless. So the destination rides its own message, and the two are
 bound by the **NTT manager's sequence** — not a Wormhole sequence, and not chain-global. Pairing a
 settlement with someone else's instruction fails that check.
@@ -87,7 +87,7 @@ belongs to whoever's funds are at risk. A scheduler stores it alongside `deposit
 an order still needs nothing off-chain.
 
 **Not payable.** Both fees come out of the swap output, which works only because Hydration's native
-currency *is* WETH — one balance behind two interfaces. That is what lets an on-chain scheduler place
+currency _is_ WETH — one balance behind two interfaces. That is what lets an on-chain scheduler place
 an order with no funding step.
 
 Relaying is [`agents/relayer`](../../agents/relayer/)'s `intent` feature: it subscribes to the
@@ -111,7 +111,7 @@ survive one swap. Every problem below comes from removing the user, not from 1Cl
 schedule — which an on-chain schedule cannot make. Delegating it to a bot moves the problem rather
 than solving it: whoever requests the quote picks `recipient`, and with no user in the loop nothing
 checks that choice. A compromised bot would redirect funds at the source, before any on-chain rule
-could object. In the user-present flow the user *is* that check.
+could object. In the user-present flow the user _is_ that check.
 
 **Pre-minting N addresses at schedule creation** freezes `minAmountOut` at quote time. Late tranches
 then execute against a stale floor and refund instead of filling. It also cannot express a rolling,
@@ -124,8 +124,8 @@ return different addresses in all three deposit modes, so nothing can re-derive 
 `400 "ANY_INPUT only supports depositType INTENTS or CONFIDENTIAL_INTENTS"` — so Wormhole cannot
 deliver into it at all.
 
-**Letting the bot hold the intents key** fails on `intents.near` having no per-key scoping: *"Every
-public key registered to an account can sign intents on its behalf."* A key is unbounded authority,
+**Letting the bot hold the intents key** fails on `intents.near` having no per-key scoping: _"Every
+public key registered to an account can sign intents on its behalf."_ A key is unbounded authority,
 so a compromised bot could withdraw anywhere.
 
 MPC derivation is what remains, and it removes the key from every human-operated component.
@@ -142,11 +142,11 @@ message goes to NEAR.** They meet only inside the router.
 
  HYDRATION  (on-chain, autonomous — no off-chain dependency)
    DCA tranche fires
-     ├── placeOrder(…, 0xN, maxRelayFee) ───────────► VALUE PATH ──┐
+     ├── IntentEmitter.placeOrder(…, 0xN, relayFee) ─►  VALUE PATH ┐
      │     sell for WETH, settle over NTT + publish the            │
      │     forwarding instruction (see Shared transport)           │
      │                                                             │
-     └── publishOrder(Order) ───────────────────────► MESSAGE PATH ┼─┐
+     └── IntentQuoteEmitter.publishQuote(Quote) ────► MESSAGE PATH ┼─┐
            once per route, not per tranche                         │ │
                                                                    │ │
  ETHEREUM                                          ◄───────────────┘ │
@@ -184,16 +184,18 @@ message goes to NEAR.** They meet only inside the router.
 ```
 
 > **The POA step is not a transaction we build.** `0xN` is POA's deposit address
-> for account `A`; sending native ETH there *is* the deposit into NEAR Intents,
+> for account `A`; sending native ETH there _is_ the deposit into NEAR Intents,
 > and POA's off-chain watcher does the crediting.
 >
 > One asset, two ends — POA states the mapping directly:
 >
 > ```json
-> { "defuse_asset_identifier": "eth:1:native",
->   "origin_chain_address":    "native",
->   "near_token_id":           "eth.omft.near",
->   "intents_token_id":        "nep141:eth.omft.near" }
+> {
+>   "defuse_asset_identifier": "eth:1:native",
+>   "origin_chain_address": "native",
+>   "near_token_id": "eth.omft.near",
+>   "intents_token_id": "nep141:eth.omft.near"
+> }
 > ```
 >
 > You deliver native ETH on Ethereum; the tradeable claim exists on NEAR as
@@ -248,7 +250,7 @@ Step by step:
 1. `v1.signer.derived_public_key({predecessor, path, domain_id: 1})` → Ed25519 pubkey.
    `domain_id: 1` selects Ed25519; `0` is Secp256k1.
 2. NEAR implicit account id `A` = lowercase hex of that pubkey's 32 bytes (base58-decode
-   the part after `ed25519:`). Self-registering with `intents.near` — the account id *is*
+   the part after `ed25519:`). Self-registering with `intents.near` — the account id _is_
    the public key, so no setup transaction and no registration.
 3. POA: `deposit_address({account_id: A, chain: "eth:1"})` → `0xN`. Permanent and
    deterministic; verified stable across repeated calls and distinct per account.
@@ -289,7 +291,7 @@ irrelevant to derivation; only account identity matters.** So forks of this rout
 are harmless — they operate on a disjoint set of accounts.
 
 > **`predecessor` is an argument on the view method, but not on `sign`.** Anyone can
-> *compute* anyone's derived public key — the table above computes `attacker.near`'s
+> _compute_ anyone's derived public key — the table above computes `attacker.near`'s
 > — because `derived_public_key` is a public read. When the router calls `sign`,
 > however, the MPC network takes the predecessor from the runtime's true caller;
 > there is no field to lie in. Public derivability of the address and authority over
@@ -306,18 +308,20 @@ name leaves the id's future in the registrar's hands.
 ### The invariant that carries the whole design
 
 Nothing external constrains how `A` is spent. `A` is a public key, not a contract
-— it has no policy and cannot refuse anyone, and `intents.near` honours *any*
+— it has no policy and cannot refuse anyone, and `intents.near` honours _any_
 valid A-signature it is shown. There is no protocol rule saying "this account may
 only be spent via `finalize`."
 
-Two layers produce the guarantee, and only the first is cryptographic:
+Two layers produce the guarantee, and only the first is cryptographic.
 
-| Layer | Mechanism | Strength |
-|---|---|---|
-| Who can sign for `A` | MPC derivation is keyed on `(caller, path)`, so only `router.near` derives `K_A`. A call from any other account yields a different key for a different account. | Cryptographic. Stops everyone else. |
-| What the router signs | The router's code only builds withdrawals whose `msg` came from a verified VAA. | Code only. As strong as the code plus immutability. |
+**Layer 1 — who can sign for `A`.** MPC derivation is keyed on `(caller, path)`, so only
+`router.near` derives `K_A`; a call from any other account yields a different key for a different
+account. Cryptographic, and it stops everyone else.
 
-Layer 2 is the router constraining *itself*, which yields a hard implementation
+**Layer 2 — what the router signs.** The router's code only builds withdrawals whose `msg` came from
+a verified VAA. Code only — as strong as the code plus its immutability.
+
+Layer 2 is the router constraining _itself_, which yields a hard implementation
 rule:
 
 > **Every code path from a public method to `v1.signer.sign` MUST be gated on a
@@ -346,16 +350,20 @@ mistake deposit-side obscurity for a control.
 
 ## 4. Components to build
 
-| # | Component | Chain | Status |
-|---|---|---|---|
-| 1 | `IntentEmitter` | Hydration EVM | **built** — `placeOrder` + `publishOrder`. Its address is what the NEAR router pins; see `schema.md` §1 |
-| 2 | `IntentReceiver` | Ethereum | **built** — `processOrder` |
-| 3 | Schedule storage | Hydration | to build — `0xN`, `maxRelayFee`, tranche params per schedule |
-| 4 | `IntentRouter` | NEAR (Rust) | to build — VAA verification, floor enforcement, intent construction, MPC signing |
-| 5 | Relay bot | off-chain | to build — balance polling, solver quoting, `finalize`, `publish_intent`, status. Holds no key material |
+| #   | Component            | Chain         | Status                                                                                                                                                                    |
+| --- | -------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `IntentEmitter`      | Hydration EVM | **built** — `placeOrder`                                                                                                                                                  |
+| 2   | `IntentReceiver`     | Ethereum      | **built** — `processOrder`                                                                                                                                                |
+| 3   | `IntentQuoteEmitter` | Hydration EVM | **built** — `publishQuote`                                                                                                                                                |
+| 4   | Schedule storage     | Hydration     | to build — `0xN`, `maxRelayFee`, tranche params per schedule                                                                                                              |
+| 5   | `IntentRouter`       | NEAR (Rust)   | to build — VAA verification, floor enforcement, intent construction, MPC signing                                                                                          |
+| 6   | Relay bot            | off-chain     | to build — balance polling, solver quoting, `finalize`, `publish_intent`, status                                                                                          |
 
-Components 1–2 are shared with the 1Click variant and already carry it. 3–5 are what the MPC variant
+Components 1–2 are shared with the 1Click variant and already carry it. 3–6 are what the MPC variant
 adds. The bot is the only stateful off-chain piece and is untrusted by construction.
+
+`IntentQuoteEmitter` is deployed separately from `IntentEmitter`, so its Wormhole emitter address is
+distinct. That address is what the NEAR router pins — see [schema.md](schema.md) §1.
 
 ---
 
@@ -365,7 +373,7 @@ adds. The bot is the only stateful off-chain piece and is untrusted by construct
 2. Scheduler calls `placeOrder(assetIn, amountIn, minEthOut, 0xN, maxRelayFee)` — sells for WETH,
    settles over NTT, publishes the forwarding instruction. See
    [Shared transport](#shared-transport).
-3. The order itself was published once by `publishOrder(Order)`, not per tranche; its VAA is
+3. The quote itself was published once by `publishQuote(Quote)`, not per tranche; its VAA is
    permanent public data that the bot resubmits every time.
 4. On Ethereum, `IntentReceiver.processOrder` delivers the settlement and forwards native ETH to
    `0xN`, net of the relay fee.
@@ -385,7 +393,7 @@ adds. The bot is the only stateful off-chain piece and is untrusted by construct
 **Failure at any of 7–12 leaves the balance untouched in `A`.** The next poll
 retries from step 6. Two tranches landing before a swap are swapped together.
 An expired quote is discarded and re-quoted at no cost — no funds move on an
-expired quote. The balance *is* the state; individual deposits are never tracked.
+expired quote. The balance _is_ the state; individual deposits are never tracked.
 
 ### Timing
 
@@ -399,7 +407,7 @@ roughly 7–8× the time premium of a 60-second one, when solvers answer at all)
 
 ## 6. Known residual: price integrity
 
-The VAA fixes *destination* integrity. It does not fix *price* integrity.
+The VAA fixes _destination_ integrity. It does not fix _price_ integrity.
 
 Hydration cannot compute a ZEC floor — it has no ZEC price — so `amount_out`
 originates from the bot's solver quote. A compromised bot cannot send funds
@@ -426,39 +434,9 @@ redirect-proof, not price-proof.
 
 ## 7. Verification status
 
-Treat anything not marked **verified** as an assumption to test before writing code.
+What has been checked against a live system, and what is still an assumption, lives in
+[verification.md](verification.md) — grouped by status, blocking items first.
 
-| Claim | Status |
-|---|---|
-| POA `deposit_address` is stable and per-account | **verified** — repeated calls identical; distinct per account; works for implicit hex ids |
-| Same H160 across EVM chains, token differs by chain | **verified** — `eth:1 → eth.omft.near`, `eth:8453 → base.omft.near`, `eth:42161 → arb.omft.near` |
-| Native ETH on `eth:1` maps to `nep141:eth.omft.near`, `min_deposit 1e11` wei | **verified** |
-| 1Click deposit addresses are non-deterministic | **verified** — identical requests, different addresses, all three modes |
-| `ANY_INPUT` rejects `ORIGIN_CHAIN` | **verified** — explicit 400 from the API |
-| `intents.near` has no per-key scoping | **verified** — *"Every public key registered to an account can sign intents on its behalf"* |
-| Intent payloads carry a `nonce` (single-use signatures) | **verified** |
-| Solver relay endpoint and method shapes | **verified from docs** — `POST https://solver-relay-v2.chaindefuser.com/rpc` |
-| Wormhole `coreBridge` configured for Hydration | **verified** — present in `xc-cfg` chain config |
-| Exact bytes signed under `nep413` / `raw_ed25519` | **UNVERIFIED — blocking.** See `schema.md` §4. Must be pinned against the verifier's own verification code. A wrong guess is a silent total failure. |
-| `v1.signer` is live on NEAR mainnet | **verified** — deployed, `code_hash EM7QrQMdd71hCHFL4RHkYQ2E4jmESpgu85mDZJu8jJJd` |
-| `derived_public_key({path, predecessor, domain_id})` shape, `domain_id: 1` → Ed25519 | **verified** — returns e.g. `ed25519:2kbv31BMDHBK54RYMX1gKiSLCXMjWphF9sbxvH4o4D3S` |
-| Derivation is keyed on `(predecessor, path)`; a different caller yields a different account | **verified** — same path from `attacker.near` gives a disjoint `A` and `0xN` |
-| Full chain `(router, path) → A → 0xN` is deterministic | **verified** — repeated runs identical |
-| `SignRequest` field names on `v1.signer.sign` | **UNVERIFIED** — the *view* method takes `domain_id`, but confirm the `sign` request struct (was `key_version`). |
-| Router account id is registered and controlled by us | **UNVERIFIED — prerequisite.** `hydration.near` exists but is empty with no contract; confirm we hold its keys. `galacticcouncil.near` is currently unregistered. The id is permanent (see §3) and must be final before the first DCA schedule exists. |
-| Solvers quote ETH→ZEC at all, at your tranche size, at 120s | **UNTESTED** — needs a Partner Portal `X-API-Key`; the 1Click distribution JWT is a different credential and returns `result: null`. **Test this first — it can invalidate the whole design.** |
-| Hydration emitter can reach `publishMessage` | **implemented** — `publishOrder` and the per-order forwarding instruction both publish through the core bridge; covered by `IntentEmitterTest` |
-| Guardians sign chain-73 VAAs at all | **verified** — 200 live chain-73 VAAs sampled from Wormholescan, all signed, newest hours old |
-| Hydration honours a requested consistency level | **UNVERIFIED** — every chain-73 VAA observed so far is level 202 (what the NTT transceivers were deployed with). Nothing has published at 200 from Hydration, so the emitter's `CONSISTENCY_INSTANT` is untested on this chain. 202 is the proven-safe fallback |
-| MPC signing latency in practice | **UNVERIFIED** — drives the `min_deadline_ms` choice |
-| ZEC withdrawal pattern via `ft_withdraw` | **UNVERIFIED** — confirm the POA withdrawal convention and the ZEC withdrawal fee |
-
-### Suggested order of work
-
-1. Get a solver-relay API key and confirm ETH→ZEC quotes exist at your tranche
-   size and window. **If solvers do not cover this pair, stop — nothing else matters.**
-2. Pin the signed-bytes construction against the verifier source.
-3. Confirm `publishMessage` reachability from the Hydration emitter.
-4. Prototype the router's MPC signing path against testnet and measure latency.
-5. Decide the upgradeability model (§3).
-6. Then build.
+Three are blocking and worth naming here: the exact bytes signed under `nep413` / `raw_ed25519`, that
+the router account id is registered and controlled by us, and that solvers quote ETH→ZEC at our
+tranche size at all. The last one can invalidate the whole design, so test it first.

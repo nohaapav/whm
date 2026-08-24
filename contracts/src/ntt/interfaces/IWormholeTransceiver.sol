@@ -14,4 +14,7 @@ interface IWormholeTransceiver {
 
     /// @notice Whether a VAA has already been consumed by this transceiver.
     function isVAAConsumed(bytes32 hash) external view returns (bool);
+
+    /// @notice The manager this transceiver delivers to.
+    function nttManager() external view returns (address);
 }

@@ -6,6 +6,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeab
 
 import {IWormhole} from "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 
+import {INttManager} from "../ntt/interfaces/INttManager.sol";
 import {IWormholeTransceiver} from "../ntt/interfaces/IWormholeTransceiver.sol";
 import {NttPayload} from "../ntt/NttPayload.sol";
 
@@ -69,8 +70,11 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
     {
         if (emitterAddress == bytes32(0)) revert NotConfigured();
 
+        (IWormhole.VM memory instruction, bool valid,) = wormhole.parseAndVerifyVM(instructionVaa);
+        if (!valid) revert InvalidInstruction();
+
         (uint64 sequence, address depositAddress, uint256 amount, uint256 maxRelayFee) =
-            _instruction(instructionVaa);
+            _requireInstruction(instruction);
 
         IWormhole.VM memory settlement = wormhole.parseVM(nttVaa);
         uint64 settled = settlement.payload.sequenceOf();
@@ -82,6 +86,9 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
         if (!transceiver.isVAAConsumed(settlement.hash)) {
             transceiver.receiveMessage(nttVaa);
         }
+
+        // Delivered is not released.
+        _requireReleased(settlement, sequence);
 
         if (address(this).balance < amount) revert NotFunded(amount, address(this).balance);
 
@@ -98,33 +105,46 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
 
     // ─── Helpers ─────────────────────────────────────────────────
 
-    /// @dev Verify the emitter's instruction, consume it, and read its terms.
+    /// @dev Authorize the emitter's instruction, consume it, and read its terms.
     /// @return sequence The settlement this instruction was published with
     /// @return depositAddress Where it forwards
     /// @return amount What the settlement delivers — NTT trims to the precision the emitter already
     ///         quantized to, so the delivery equals this exactly
     /// @return maxRelayFee Ceiling on the caller's claim
-    function _instruction(bytes calldata instructionVaa)
-        internal
+    function _requireInstruction(IWormhole.VM memory instruction)
+        private
         returns (uint64 sequence, address depositAddress, uint256 amount, uint256 maxRelayFee)
     {
-        (IWormhole.VM memory vm, bool valid,) = wormhole.parseAndVerifyVM(instructionVaa);
-
-        if (!valid) revert InvalidInstruction();
-
         if (
-            vm.emitterChainId != HydrationConsts.WORMHOLE_CHAIN_ID ||
-            vm.emitterAddress != emitterAddress
+            instruction.emitterChainId != HydrationConsts.WORMHOLE_CHAIN_ID ||
+            instruction.emitterAddress != emitterAddress
         ) {
-            revert UnauthorizedEmitter(vm.emitterChainId, vm.emitterAddress);
+            revert UnauthorizedEmitter(instruction.emitterChainId, instruction.emitterAddress);
         }
 
-        if (processed[vm.hash]) revert AlreadyRedeemed();
-        processed[vm.hash] = true;
+        if (processed[instruction.hash]) revert AlreadyRedeemed();
+        processed[instruction.hash] = true;
 
         (sequence, depositAddress, amount, maxRelayFee) =
-            abi.decode(vm.payload, (uint64, address, uint256, uint256));
+            abi.decode(instruction.payload, (uint64, address, uint256, uint256));
         if (depositAddress == address(0)) revert MalformedInstruction();
+    }
+
+    /// @dev Assert the settlement's funds landed here, rather than inferring it from delivery: the
+    ///      manager marks a message executed before the inbound rate limiter runs, and a queued
+    ///      transfer releases nothing until someone completes it.
+    function _requireReleased(IWormhole.VM memory settlement, uint64 sequence) private view {
+        INttManager manager = INttManager(transceiver.nttManager());
+        bytes32 digest = keccak256(
+            abi.encodePacked(settlement.emitterChainId, settlement.payload.managerMessage())
+        );
+
+        if (
+            !manager.isMessageExecuted(digest) ||
+            manager.getInboundQueuedTransfer(digest).txTimestamp != 0
+        ) {
+            revert SettlementNotReleased(sequence);
+        }
     }
 
     /// @dev Everything this contract moves is native ETH.

@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 
 import {IWormhole} from "wormhole-solidity-sdk/interfaces/IWormhole.sol";
 
+import {INttManager} from "../../src/ntt/interfaces/INttManager.sol";
 import {NttPayload} from "../../src/ntt/NttPayload.sol";
 
 import {IntentReceiver} from "../../src/intents/IntentReceiver.sol";
@@ -43,17 +44,60 @@ contract MockWormhole {
     }
 }
 
+/// @dev Stands in for NTT's manager: a message is marked executed before the rate limiter runs, so
+///      "executed" alone never means the funds moved — a queued entry says they did not.
+contract MockNttManager {
+    mapping(bytes32 => bool) public isMessageExecuted;
+    mapping(bytes32 => INttManager.InboundQueuedTransfer) internal _queued;
+
+    function markExecuted(bytes32 digest) external {
+        isMessageExecuted[digest] = true;
+    }
+
+    function enqueue(bytes32 digest, uint64 txTimestamp) external {
+        _queued[digest].txTimestamp = txTimestamp;
+    }
+
+    function getInboundQueuedTransfer(bytes32 digest)
+        external
+        view
+        returns (INttManager.InboundQueuedTransfer memory)
+    {
+        return _queued[digest];
+    }
+}
+
 /// @dev Stands in for NTT's transceiver: delivering a settlement credits the receiver with the ETH
 ///      the manager would have released. Permissionless, exactly like the real one.
 contract MockTransceiver {
+    using NttPayload for bytes;
+
     mapping(bytes32 => bool) public isVAAConsumed;
 
     address public receiver;
     uint256 public release;
+    MockNttManager public manager = new MockNttManager();
+
+    /// @dev Consume the VAA without the manager executing it — what a sub-threshold attestation
+    ///      looks like when more than one transceiver is enabled.
+    bool public skipExecute;
 
     function configure(address _receiver, uint256 _release) external {
         receiver = _receiver;
         release = _release;
+    }
+
+    function setSkipExecute(bool value) external {
+        skipExecute = value;
+    }
+
+    function nttManager() external view returns (address) {
+        return address(manager);
+    }
+
+    /// @dev Hold a delivered settlement in the inbound rate-limit queue.
+    function enqueue(bytes memory encodedMessage) external {
+        manager.enqueue(_digest(encodedMessage), uint64(block.timestamp));
     }
 
     receive() external payable {}
@@ -63,8 +107,16 @@ contract MockTransceiver {
         require(!isVAAConsumed[hash], "consumed");
         isVAAConsumed[hash] = true;
 
+        if (!skipExecute) manager.markExecuted(_digest(encodedMessage));
+
         (bool ok,) = receiver.call{value: release}("");
         require(ok, "release failed");
+    }
+
+    function _digest(bytes memory encodedMessage) internal pure returns (bytes32) {
+        (uint16 chainId,,,, bytes memory payload) =
+            abi.decode(encodedMessage, (uint16, bytes32, uint32, uint64, bytes));
+        return keccak256(abi.encodePacked(chainId, payload.managerMessage()));
     }
 }
 
@@ -213,6 +265,50 @@ contract IntentReceiverTest is Test {
     }
 
     /// @notice NTT's delivery is permissionless, so someone else getting there first is ordinary.
+    /// @notice A settlement NTT delivered but held in the inbound rate-limit queue has released
+    ///         nothing, so its instruction must not be paid out of another order's ETH.
+    function testQueuedSettlementIsNotPaidFromAnotherOrder() public {
+        // Another order's settlement is already sitting here.
+        vm.deal(address(receiver), AMOUNT);
+
+        // A generic relayer delivered ours, but the limiter queued it — nothing was released.
+        bytes memory settlement = _settlement(SEQUENCE);
+        transceiver.configure(address(receiver), 0);
+        transceiver.receiveMessage(settlement);
+        transceiver.enqueue(settlement);
+
+        vm.prank(relayer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IIntentReceiver.SettlementNotReleased.selector, SEQUENCE)
+        );
+        receiver.processOrder(
+            settlement, _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE), MAX_RELAY_FEE
+        );
+
+        assertEq(address(receiver).balance, AMOUNT, "the other order's ETH must be untouched");
+    }
+
+    /// @notice A VAA the transceiver consumed but the manager never executed — a sub-threshold
+    ///         attestation — is not a delivery either.
+    function testUnexecutedSettlementIsNotPaid() public {
+        vm.deal(address(receiver), AMOUNT);
+
+        bytes memory settlement = _settlement(SEQUENCE);
+        transceiver.configure(address(receiver), 0);
+        transceiver.setSkipExecute(true);
+        transceiver.receiveMessage(settlement);
+
+        vm.prank(relayer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IIntentReceiver.SettlementNotReleased.selector, SEQUENCE)
+        );
+        receiver.processOrder(
+            settlement, _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE), MAX_RELAY_FEE
+        );
+
+        assertEq(address(receiver).balance, AMOUNT, "the other order's ETH must be untouched");
+    }
+
     function testStillForwardsWhenAlreadyDelivered() public {
         transceiver.receiveMessage(_settlement(SEQUENCE));
 

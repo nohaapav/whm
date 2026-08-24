@@ -16,10 +16,10 @@ verifiable; nothing is passed as a caller argument.
                       HYDRATION                          ETHEREUM              NEAR
                       ─────────                          ────────              ────
 
-  publishOrder(Order)
+  publishQuote(Quote)
     │
-    ├─► [A] order VAA ──────────────────────────────────────────────────────► IntentRouter
-    │        emitter: IntentEmitter                                             reads `recipient`
+    ├─► [A] quote VAA ──────────────────────────────────────────────────────► IntentRouter
+    │        emitter: IntentQuoteEmitter                                        reads `recipient`
     │        payload: packed terms (§2)                                         re-derives A from
     │        path:    keccak256(payload)                                        keccak256(payload)
     │        once per route, replayed every fill
@@ -43,27 +43,34 @@ verifiable; nothing is passed as a caller argument.
 independent** — published once per route, and only the MPC variant has one at all. The 1Click variant
 uses [B] + [C] and stops at the deposit address.
 
-## Three sequence counters, easily confused
+**[A] and [C] have different emitter addresses**, because `IntentQuoteEmitter` is a separate
+deployment from `IntentEmitter`. `IntentReceiver` pins the emitter it accepts instructions from, so a
+quote VAA reaches `UnauthorizedEmitter` before anything decodes it — the two message types cannot be
+confused for one another regardless of what their bytes happen to look like.
+
+## Four sequence counters, easily confused
 
 ```
   NttManager._useMessageSequence()   ← what transfer() returns, and what [C] names.
                                        NOT a Wormhole sequence.
   transceiver's Wormhole sequence    ← addresses [B].  Published with nonce 0,
                                        return value discarded on-chain.
-  IntentEmitter's Wormhole sequence  ← addresses [A] and [C].
+  IntentEmitter's Wormhole sequence  ← addresses [C].
+  IntentQuoteEmitter's sequence      ← addresses [A]. Separate contract,
+                                       separate emitter, separate counter.
 ```
 
-All three increment independently. `processOrder` re-derives the manager sequence from [B]'s payload
+All four increment independently. `processOrder` re-derives the manager sequence from [B]'s payload
 and requires it to equal the one [C] names — that check is what stops a caller pairing any pending
 settlement with whichever instruction carries the richest ceiling.
 
 ## Derivation chain (MPC variant)
 
 ```
-   Order terms                encodeOrder (§2)
+   Quote terms                encodeQuote (§2)
    ┌──────────────────┐       packed bytes
    │ version          │            │
-   │ orderId          │            ▼
+   │ quoteId          │            ▼
    │ maxSlippageBps   │─────► keccak256 ─────► path (bytes32)
    │ recipientKind    │                          │
    │ destinationAsset │                          │  v1.signer.derived_public_key
@@ -127,12 +134,12 @@ reproduce exactly.
 ### The path is the hash of the terms
 
 `"dca-1"` above is a label, chosen to show the mechanics with a readable value. In production the
-path is **`keccak256(encodeOrder(order))`** — the hash of the exact bytes published, available
+path is **`keccak256(encodeQuote(order))`** — the hash of the exact bytes published, available
 on-chain as `IntentEmitter.computeAuthPath(order)` and mirrored by
 [`IntentCodec.authPath`](../../contracts/src/intents/IntentCodec.sol).
 
 This is load-bearing, not cosmetic. Publishing is permissionless, so with a label — or with
-`orderId` — as the path, anyone could publish _their own_ order at the same path carrying _their own_
+`quoteId` — as the path, anyone could publish _their own_ order at the same path carrying _their own_
 `recipient`. Both orders would derive the same account `A`, and the router honouring either would pay
 the attacker out of a balance the victim funded. Deriving from the terms makes that impossible:
 change any field and you get a different path, a different `A`, and a different deposit address, so
@@ -142,7 +149,7 @@ Consequences worth stating plainly:
 
 - **`recipient` is inside the path.** Two destinations from one source are two accounts; they cannot
   be merged by accident.
-- **`orderId` is only a namespace.** It lets two schedules that agree on every other term stay on
+- **`quoteId` is only a namespace.** It lets two schedules that agree on every other term stay on
   disjoint accounts. The router never interprets it.
 - **Republishing is harmless.** The same terms hash to the same path, so a duplicate publish is a
   no-op rather than a second authorization.
@@ -248,7 +255,7 @@ source of truth, so a drain is inherently idempotent — it swaps whatever is th
 and with nothing there it simply fails. Replay protection is unnecessary for a
 standing authorization; the balance bounds it.
 
-Two different destinations from the same source means two `orderId`s, hence two
+Two different destinations from the same source means two `quoteId`s, hence two
 accounts and two deposit addresses. Keep them disjoint.
 
 ### Layout
@@ -263,7 +270,7 @@ so an off-chain encoder can be diffed against it rather than trusted.
 ```
  byte  0    1                                33      35 36 37            37+D        38+D
        ├────┼───────────────────────────────────┼──────┼──┼──┼─────────────┼──────────┼──────────┐
-       │ ver│            orderId                │ slip │k │D │ destAsset   │    R     │ recipient│
+       │ ver│            quoteId                │ slip │k │D │ destAsset   │    R     │ recipient│
        │  1 │              32                   │   2  │1 │1 │     D       │    1     │    R     │
        └────┴───────────────────────────────────┴──────┴──┴──┴─────────────┴──────────┴──────────┘
        │◄────────────── ORDER_HEADER_SIZE = 37 ──────────────►│
@@ -273,20 +280,23 @@ so an off-chain encoder can be diffed against it rather than trusted.
 ```
 
 Two length-prefixed strings, and the second length is only readable after the first string is
-consumed. `decodeOrder` therefore validates the total against **both** lengths and rejects any buffer
+consumed. `decodeQuote` therefore validates the total against **both** lengths and rejects any buffer
 that does not account exactly — a buffer two different orders could hash from is not one to read the
 first of.
 
 | Offset | Size | Field              | Type    | Notes                                                                                                                                                         |
 | ------ | ---- | ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0      | 1    | `version`          | u8      | `1`. Reject anything else. Inside the hash, so a future layout derives disjoint accounts.                                                                     |
-| 1      | 32   | `orderId`          | bytes32 | Namespace value, unique per schedule. Meaningless to the router; it only keeps two schedules sharing every other term on disjoint accounts. Must be non-zero. |
+| 1      | 32   | `quoteId`          | bytes32 | Namespace value, unique per schedule. Must be non-zero. |
 | 33     | 2    | `maxSlippageBps`   | u16     | Floor tolerance, committed at order creation.                                                                                                                 |
-| 35     | 1    | `recipientKind`    | u8      | `0` = destination chain (→ `ft_withdraw`), `1` = intents account (→ `transfer`).                                                                              |
+| 35     | 1    | `recipientKind`    | u8      | `0` = destination chain (`ft_withdraw`), `1` = intents account (`transfer`).                                                                              |
 | 36     | 1    | `destAssetLen`     | u8      |                                                                                                                                                               |
 | 37     | D    | `destinationAsset` | bytes   | UTF-8 intents token id, e.g. `nep141:zec.omft.near`. Use the bare id, **not** 1Click's `1cs_v1:` form.                                                        |
 | 37+D   | 1    | `recipientLen`     | u8      |                                                                                                                                                               |
 | 38+D   | R    | `recipient`        | bytes   | UTF-8 destination address. **The value the whole design protects.**                                                                                           |
+
+`quoteId` is meaningless to the router. It exists so two schedules that agree on every other term
+stay on disjoint accounts; reusing one merges their balances.
 
 `destinationAsset` is carried rather than hardcoded — without it the router could
 only ever produce one asset, and the emitter is meant to serve any route.
@@ -298,14 +308,14 @@ Carrying it would only add 32 bytes and a second way to be wrong.
 
 **Length bounds live in the encoder, not at the call site.** A string over 255 bytes wraps to zero
 through the `uint8` length cast, which would let two different orders produce the same bytes — and
-therefore the same account. `encodeOrder` rejects `0` and `>255` for both strings so no caller can
+therefore the same account. `encodeQuote` rejects `0` and `>255` for both strings so no caller can
 obtain an ambiguous hash.
 
 ### Emit (Hydration, Solidity)
 
 ```solidity
 struct IntentOrder {
-    bytes32 orderId;
+    bytes32 quoteId;
     bytes32 intentsAccount;
     uint16  maxSlippageBps;
     uint8   recipientKind;
@@ -319,7 +329,7 @@ function _encode(IntentOrder memory o) internal pure returns (bytes memory) {
     require(a.length > 0 && a.length <= 255, "bad asset");
     require(r.length > 0 && r.length <= 255, "bad recipient");
     return abi.encodePacked(
-        uint8(1), o.orderId, o.intentsAccount, o.maxSlippageBps,
+        uint8(1), o.quoteId, o.intentsAccount, o.maxSlippageBps,
         o.recipientKind, uint8(a.length), a, uint8(r.length), r
     );
 }
@@ -427,8 +437,23 @@ pairing any pending settlement with whichever instruction carries the richest ce
 
 **Why `amount` is carried rather than read from the settlement.** The receiver would otherwise have
 to parse the NTT transfer payload to learn it. Carrying it costs 32 bytes and makes the instruction
-self-describing; the settlement still has to have actually landed, which `processOrder` checks
-against its own balance before moving anything.
+self-describing; the settlement still has to have actually landed before anything moves.
+
+**Delivered is not released.** `processOrder` cannot infer that funds arrived from the settlement
+having been delivered. NTT's inbound rate limiter consumes the VAA and marks the manager message
+executed *before* it decides whether to release, so a rate-limited transfer is queued and credits
+nothing while `isVAAConsumed` reads true. The receiver therefore asks the manager directly —
+`isMessageExecuted(digest) && getInboundQueuedTransfer(digest).txTimestamp == 0` — and reverts
+`SettlementNotReleased` otherwise, on top of the balance check. The digest is
+`keccak256(abi.encodePacked(sourceChainId, managerMessage))`, where `managerMessage` is the slice
+`NttPayload` already walks past.
+
+| `isMessageExecuted` | `txTimestamp` | state |
+| --- | --- | --- |
+| false | 0 | never delivered or attested |
+| true | 0 | released |
+| true | ≠ 0 | queued — nothing credited |
+| true | 0 | queued, then completed — released |
 
 **Consistency level.** Published instantly (200) rather than finalized. The instruction carries no
 authority of its own — it is inert until a settlement naming the same sequence arrives — so waiting
