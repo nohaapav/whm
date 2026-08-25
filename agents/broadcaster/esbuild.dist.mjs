@@ -1,9 +1,6 @@
 import esbuild from "esbuild";
-import { config } from "../../esbuild.config.mjs";
 
-esbuild
-  .build({
-    ...config,
-    bundle: true,
-  })
-  .catch(() => process.exit(1));
+import { config } from "../../esbuild.config.mjs";
+import { multiEntry } from "./esbuild.entries.mjs";
+
+esbuild.build(multiEntry(config)).catch(() => process.exit(1));

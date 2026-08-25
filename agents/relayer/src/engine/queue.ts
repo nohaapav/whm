@@ -35,7 +35,7 @@ export interface QueueDeps {
   /** Alert sink for low/exhausted gas. Optional — omit to log only. */
   discordWebhook?: string;
   /** Warn when the balance drops below this multiple of one submission's cost. */
-  warnMultiplier?: bigint;
+  warnMultiplier: bigint;
 }
 
 /**
@@ -47,8 +47,7 @@ export interface QueueDeps {
  * acked so one bad VAA cannot wedge the queue.
  */
 export function createQueue(deps: QueueDeps) {
-  const { publicClient, account } = deps;
-  const warnMultiplier = deps.warnMultiplier ?? 50n;
+  const { publicClient, account, warnMultiplier } = deps;
 
   const pending: Task[] = [];
   let nonce: number;

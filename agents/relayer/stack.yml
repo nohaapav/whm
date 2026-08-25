@@ -1,19 +1,16 @@
 version: '3.3'
 services:
-  # One image, three services. A feature runs when its signing key is present, so each container
-  # enables exactly one — and each keeps its own engine namespace, hence its own Redis state.
-  hydration-ntt:
+  # One image, one service per app. The command names the entry point — nothing is selected at
+  # runtime, and each app keeps its own engine namespace, hence its own Redis state.
+  app-ntt:
     image: galacticcouncil/relayer:latest
+    command: [node, ntt/app.js]
     environment:
-      # APP_NAME is LOAD-BEARING: every Redis key derives from it. Renaming orphans the queue and
-      # the missed-VAA cursors, and the worker then rescans from NTT_*_FROM_SEQ.
-      APP_NAME: hydration-ntt-relayer
-      HYDRATION_RPC: https://rpc.hydradx.cloud
-      NTT_BASE_FROM_SEQ: '0'
-      NTT_ETH_FROM_SEQ: '0'
-      NTT_SOLANA_FROM_SEQ: '0'
-      NTT_SUI_FROM_SEQ: '0'
       PRIVKEY: FILL THIS KEY ALWAYS
+      RPC_HYDRATION: https://rpc.hydradx.cloud
+      # Optional: alert sink and the multiple of one submission's cost to warn below.
+      DISCORD_WEBHOOK_URL: MAYBE FILL THIS URL OR REMOVE IT
+      GAS_WARN_MULTIPLIER: '50'
       REDIS_HOST: redis
       SPY_ENDPOINT: spy:7073
       WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
@@ -25,40 +22,39 @@ services:
       labels:
         swarmpit.service.deployment.autoredeploy: 'true'
 
-  intent:
+  app-oracle:
     image: galacticcouncil/relayer:latest
+    command: [node, oracle/app.js]
     environment:
-      # INTENT_APP_NAME is LOAD-BEARING — see the note above.
-      INTENT_APP_NAME: intent-relayer
-      ETH_RPC: https://ethereum-rpc.publicnode.com
-      HYDRATION_FROM_SEQ: '0'
-      HYDRATION_RPC: https://rpc.hydradx.cloud
-      INTENT_EMITTER: FILL THIS ADDRESS # IntentEmitter on Hydration
-      INTENT_PRIVKEY: FILL THIS KEY ALWAYS # reimbursed wallet, separate from PRIVKEY
-      INTENT_RECEIVER: FILL THIS ADDRESS # IntentReceiver on Ethereum
-      NTT_TRANSCEIVER: '0x8acce9CA511d5D7213F8C3f813B8916087cd00ae' # WETH transceiver on Hydration
+      # Writes to the receivers; a different key from app-ntt's so the two do not share a nonce.
+      PRIVKEY: FILL THIS KEY ALWAYS
+      RPC_HYDRATION: https://rpc.hydradx.cloud
+      # Optional: alert sink and the multiple of one submission's cost to warn below.
+      DISCORD_WEBHOOK_URL: MAYBE FILL THIS URL OR REMOVE IT
+      GAS_WARN_MULTIPLIER: '50'
+      REDIS_HOST: redis
+      SPY_ENDPOINT: spy:7073
+      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: 'true'
+
+  app-intent:
+    image: galacticcouncil/relayer:latest
+    command: [node, intent/app.js]
+    environment:
+      # Reimbursed wallet; again its own key.
+      PRIVKEY: FILL THIS KEY ALWAYS
+      RPC_ETHEREUM: https://ethereum-rpc.publicnode.com
+      RPC_HYDRATION: https://rpc.hydradx.cloud
       QUOTER_URL: http://quoter:8080 # reachable quoter service (deployed separately)
-      REDIS_HOST: redis
-      SPY_ENDPOINT: spy:7073
-      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
-    networks:
-      - default
-    logging:
-      driver: json-file
-    deploy:
-      labels:
-        swarmpit.service.deployment.autoredeploy: 'true'
-
-  oracle:
-    image: galacticcouncil/relayer:latest
-    environment:
-      # ORACLE_APP_NAME is LOAD-BEARING — see the note above.
-      ORACLE_APP_NAME: oracle-relayer
-      HYDRATION_RPC: https://rpc.hydradx.cloud
-      # 0x-prefixed. Writes to the receivers; separate from PRIVKEY so the two do not share a nonce.
-      ORACLE_PRIVKEY: FILL THIS KEY ALWAYS
-      ORACLE_SOLANA_FROM_SEQ: '0'
-      ORACLE_ETH_FROM_SEQ: '0'
+      # Optional: alert sink and the multiple of one submission's cost to warn below.
+      DISCORD_WEBHOOK_URL: MAYBE FILL THIS URL OR REMOVE IT
+      GAS_WARN_MULTIPLIER: '50'
       REDIS_HOST: redis
       SPY_ENDPOINT: spy:7073
       WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT

@@ -9,6 +9,6 @@ FROM node:25-slim
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
-COPY dist/index.js ./index.js
+COPY dist/ ./
 
-CMD ["node", "index.js"]
+CMD ["node", "ntt/app.js"]

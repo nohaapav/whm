@@ -1,7 +1,7 @@
 import { pad, type Address } from "viem";
 
 /**
- * NTT transceiver payload parsing. Shared by every feature that reads an NTT settlement, whichever
+ * NTT transceiver payload parsing. Shared by every app that reads an NTT settlement, whichever
  * direction it travels.
  *
  * TransceiverMessage wire format, as far as the manager's message id:

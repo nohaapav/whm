@@ -19,7 +19,7 @@ const BANNER = String.raw`
  ╚════██║██║     ██╔══██║██║╚██╗██║
  ███████║╚██████╗██║  ██║██║ ╚████║
  ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝
-   whm multi-feature event indexer
+        Wormhole event indexer
 `;
 
 async function main(): Promise<void> {

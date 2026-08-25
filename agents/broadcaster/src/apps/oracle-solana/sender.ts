@@ -5,7 +5,7 @@ import type { OracleEmitter } from "./emitter/types.js";
 import type { PriceFeedEntry, RateFeedEntry, FeedEntry } from "./feeds.js";
 import { assetIdStr } from "./feeds.js";
 
-import log from "./logger.js";
+import log from "../../logger.js";
 
 const { PublicKey } = anchor.web3;
 

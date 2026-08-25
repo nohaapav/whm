@@ -2,19 +2,32 @@ import { createPublicClient, createWalletClient, http, pad, type Hash } from "vi
 import { privateKeyToAccount } from "viem/accounts";
 import { mainnet } from "viem/chains";
 
-import logger from "../../logger";
-import { engineConfig } from "../../config/env";
-import { HYDRATION_CHAIN, intentConfig } from "../../config/intent";
+import { boot } from "../../boot";
+import { WORMHOLE } from "../../chains";
+import { alerts, engineConfig, privateKey } from "../../config";
 import { makeApp } from "../../engine/app";
 import { onEmitter } from "../../engine/emitter";
 import { isNttTransfer, settlementSequence } from "../../engine/ntt";
 import { createQueue } from "../../engine/queue";
 import { fetchVaa, normalizeTxHash } from "../../engine/vaa";
-import type { Feature, Next, RelayerCtx } from "../../types";
+import logger from "../../logger";
+import type { Next, RelayerCtx } from "../../types";
 
 import { receiverAbi } from "./abi";
+import {
+  APP_NAME,
+  FROM_SEQUENCE,
+  MAX_VAA_AGE_MS,
+  QUOTER_URL,
+  RETRIES,
+  RETRY_BASE_MS,
+  RETRY_MAX_MS,
+  RPC_ETHEREUM,
+  RPC_HYDRATION,
+} from "./config";
 import { findInstruction } from "./instruction";
 import { quoteRelayFee } from "./quote";
+import { route } from "./routes";
 
 /**
  * Intents v2 — Hydration settles WETH to Ethereum over NTT and publishes a forwarding instruction
@@ -25,36 +38,30 @@ import { quoteRelayFee } from "./quote";
  * demand, so there is no pairing state to lose: the engine's missed-VAA worker and retry backoff
  * recover an order on their own, and a retry rebuilds everything from the settlement alone.
  */
-export function intentFeature(): Feature {
-  return { name: "intent", start };
-}
-
 async function start(): Promise<void> {
-  const cfg = intentConfig();
-  const account = privateKeyToAccount(cfg.privateKey);
+  const { transceiver, emitter, receiver } = route();
+  const account = privateKeyToAccount(privateKey());
 
-  const eth = createPublicClient({ chain: mainnet, transport: http(cfg.ethRpc) });
-  const wallet = createWalletClient({ account, chain: mainnet, transport: http(cfg.ethRpc) });
+  const eth = createPublicClient({ chain: mainnet, transport: http(RPC_ETHEREUM) });
+  const wallet = createWalletClient({ account, chain: mainnet, transport: http(RPC_ETHEREUM) });
   // Read-only: the source tx receipt the forwarding instruction is found in.
-  const hydration = createPublicClient({ transport: http(cfg.hydrationRpc) });
+  const hydration = createPublicClient({ transport: http(RPC_HYDRATION) });
 
   const queue = createQueue({
     publicClient: eth,
     account,
-    discordWebhook: cfg.discordWebhook,
-    warnMultiplier: cfg.warnMultiplier,
+    ...alerts(),
   });
 
   // Constant per process; the instruction VAA is always addressed to this emitter.
-  const emitterHex = pad(cfg.emitter, { size: 32 }).slice(2);
+  const emitterHex = pad(emitter, { size: 32 }).slice(2);
 
   const nonce = await queue.init();
-  logger.info("Intent relayer starting");
   logger.info(`  account:     ${account.address} (nonce ${nonce})`);
-  logger.info(`  transceiver: ${cfg.transceiver} @ hydration`);
-  logger.info(`  emitter:     ${cfg.emitter} @ hydration`);
-  logger.info(`  receiver:    ${cfg.receiver} @ ethereum`);
-  logger.info(`  quoter:      ${cfg.quoterUrl}`);
+  logger.info(`  transceiver: ${transceiver} @ hydration`);
+  logger.info(`  emitter:     ${emitter} @ hydration`);
+  logger.info(`  receiver:    ${receiver} @ ethereum`);
+  logger.info(`  quoter:      ${QUOTER_URL}`);
 
   /**
    * Deliver a settlement and forward it, in one call. Simulated first so a revert surfaces as a
@@ -69,7 +76,7 @@ async function start(): Promise<void> {
     ] as const;
 
     await eth.simulateContract({
-      address: cfg.receiver,
+      address: receiver,
       abi: receiverAbi,
       functionName: "processOrder",
       args,
@@ -77,7 +84,7 @@ async function start(): Promise<void> {
     });
 
     return wallet.writeContract({
-      address: cfg.receiver,
+      address: receiver,
       abi: receiverAbi,
       functionName: "processOrder",
       args,
@@ -111,7 +118,7 @@ async function start(): Promise<void> {
     const sequence = settlementSequence(vaa.payload);
     const order = await findInstruction(
       hydration,
-      cfg.emitter,
+      emitter,
       normalizeTxHash(sourceTxHash) as Hash,
       sequence,
     );
@@ -123,25 +130,30 @@ async function start(): Promise<void> {
 
     // An order we could have delivered and did not — worth seeing.
     const ageMin = Math.round((Date.now() - vaa.timestamp * 1000) / 60_000);
-    if (ageMin * 60_000 > cfg.maxVaaAgeMs) {
-      log.info(`Order ${sequence} stale (${ageMin}m > ${cfg.maxVaaAgeMs / 60_000}m)`);
+    if (ageMin * 60_000 > MAX_VAA_AGE_MS) {
+      log.info(`Order ${sequence} stale (${ageMin}m > ${MAX_VAA_AGE_MS / 60_000}m)`);
       return next();
     }
 
     const attempt = ctx.storage?.job?.attempts ?? 0;
-    const fee = await quoteRelayFee(cfg);
+    const fee = await quoteRelayFee();
     if (fee > order.maxRelayFee) {
       throw new Error(
-        `Order ${sequence} unprofitable (attempt ${attempt}/${cfg.retries}): ` +
+        `Order ${sequence} unprofitable (attempt ${attempt}/${RETRIES}): ` +
           `fee ${fee} > ceiling ${order.maxRelayFee}; retrying with backoff`,
       );
     }
 
-    const instructionVaa = await fetchVaa(ctx, HYDRATION_CHAIN, emitterHex, order.messageSequence);
+    const instructionVaa = await fetchVaa(
+      ctx,
+      WORMHOLE.hydration,
+      emitterHex,
+      order.messageSequence,
+    );
 
     log.info(
       `Order ${sequence}: ${order.amount} wei -> ${order.depositAddress}, ` +
-        `fee ${fee} <= ${order.maxRelayFee} (attempt ${attempt}/${cfg.retries})`,
+        `fee ${fee} <= ${order.maxRelayFee} (attempt ${attempt}/${RETRIES})`,
     );
 
     queue.add({
@@ -153,13 +165,15 @@ async function start(): Promise<void> {
   }
 
   const app = makeApp(engineConfig(), {
-    name: cfg.name,
-    retries: cfg.retries,
-    backoff: { baseMs: cfg.retryBaseMs, maxMs: cfg.retryMaxMs },
-    startingSequence: { [HYDRATION_CHAIN]: cfg.fromSequence },
+    name: APP_NAME,
+    retries: RETRIES,
+    backoff: { baseMs: RETRY_BASE_MS, maxMs: RETRY_MAX_MS },
+    startingSequence: FROM_SEQUENCE,
   });
 
-  onEmitter(app, HYDRATION_CHAIN, cfg.transceiver, handle as never);
+  onEmitter(app, WORMHOLE.hydration, transceiver, handle as never);
 
   await app.listen();
 }
+
+boot("intent", start);

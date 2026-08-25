@@ -5,7 +5,7 @@ import {
 } from "@wormhole-foundation/relayer-engine";
 
 import logger from "../logger";
-import type { EngineConfig } from "../config/env";
+import type { EngineConfig } from "../config";
 import type { ChainId, RelayerApp } from "../types";
 
 export interface AppOptions {

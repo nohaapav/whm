@@ -19,7 +19,7 @@ export type RelayerCtx = StandardRelayerContext & {
   vaa: ParsedVaa;
 };
 
-/** The parsed VAA on `ctx`, narrowed to the fields features actually read. */
+/** The parsed VAA on `ctx`, narrowed to the fields apps actually read. */
 export interface ParsedVaa {
   bytes: Buffer;
   payload: Buffer;
@@ -33,13 +33,3 @@ export interface ParsedVaa {
 export type Next = () => Promise<void> | void;
 
 export type RelayerApp = StandardRelayerApp<StandardRelayerContext>;
-
-/**
- * A capability the relayer can run. Enabled by supplying its config; each one registers its own
- * subscriptions on its own engine app and owns its own Redis namespace.
- */
-export interface Feature {
-  readonly name: string;
-  /** Register subscriptions and start listening. Resolves once the app is live. */
-  start(): Promise<void>;
-}

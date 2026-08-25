@@ -2,7 +2,7 @@ import * as anchor from "@coral-xyz/anchor";
 import type { Program } from "@coral-xyz/anchor";
 
 import type { OracleEmitter } from "./emitter/types.js";
-import log from "./logger.js";
+import log from "../../logger.js";
 
 export interface PriceFeedEntry {
   kind: "price";

@@ -11,21 +11,17 @@ import {
 
 import { wallet } from "@whm/common/evm";
 
-import log from "../logger.js";
-import type { ChainAdapter, Feed } from "./types.js";
+import { boot } from "../../loop.js";
+import type { Broadcaster, Feed } from "../../types.js";
+import log from "../../logger.js";
+
+import { RPC, signingKey } from "./config.js";
+import { CHAIN_ID, ROUTES, type EmitterRoute } from "./routes.js";
 
 type EvmPublicClient = ReturnType<typeof wallet.getWallet>["publicClient"];
 
-interface EthereumConfig {
-  rpcUrl: string;
-  chainId: number;
-  privateKey: Hex;
-  emitter: Address;
-  fromBlock: bigint;
-  symbols: string[]; // when set, assetId = keccak256(symbol) (no getLogs); else log-scan
-}
-
 interface EvmFeed extends Feed {
+  emitter: Address;
   assetId: Hex;
   source: Address;
   call: Hex;
@@ -105,45 +101,64 @@ async function discoverAssetIds(
   return [...seen];
 }
 
-export function createEthereumAdapter(cfg: EthereumConfig): ChainAdapter {
-  const { publicClient, walletClient, account } = wallet.getWallet(
-    cfg.rpcUrl,
-    cfg.chainId,
-    cfg.privateKey,
-  );
+function build(): Broadcaster {
+  const { publicClient, walletClient, account } = wallet.getWallet(RPC, CHAIN_ID, signingKey());
 
-  log.info(`  [ethereum] emitter: ${cfg.emitter} (chain ${cfg.chainId}, signer ${account.address})`);
+  for (const route of ROUTES) {
+    log.info(`  [${route.label}] emitter: ${route.emitter} (chain ${CHAIN_ID})`);
+  }
+  log.info(`  signer: ${account.address}`);
 
-  return {
-    name: "ethereum",
+  /** Resolve one route's registered feeds. Symbols work on any RPC; the scan needs an archive. */
+  async function routeFeeds(route: EmitterRoute): Promise<EvmFeed[]> {
+    const candidates: { assetId: Hex; label: string }[] =
+      route.symbols.length > 0
+        ? route.symbols.map((s) => ({ assetId: keccak256(toBytes(s)), label: s }))
+        : (await discoverAssetIds(publicClient, route.emitter, route.fromBlock)).map((assetId) => ({
+            assetId,
+            label: assetId,
+          }));
 
-    async loadFeeds() {
-      // Symbols (assetId = keccak256(symbol), no getLogs) work on any RPC; the
-      // FeedRegistered log-scan fallback needs an archive-capable RPC.
-      const candidates: { assetId: Hex; label: string }[] =
-        cfg.symbols.length > 0
-          ? cfg.symbols.map((s) => ({ assetId: keccak256(toBytes(s)), label: s }))
-          : (await discoverAssetIds(publicClient, cfg.emitter, cfg.fromBlock)).map((assetId) => ({
-              assetId,
-              label: assetId,
-            }));
+    const feeds: EvmFeed[] = [];
+    for (const { assetId, label } of candidates) {
+      const [source, call] = (await publicClient.readContract({
+        address: route.emitter,
+        abi: EMITTER_ABI,
+        functionName: "feeds",
+        args: [assetId],
+      })) as readonly [Address, Hex];
 
-      const feeds: EvmFeed[] = [];
-      for (const { assetId, label } of candidates) {
-        const [source, call] = (await publicClient.readContract({
-          address: cfg.emitter,
-          abi: EMITTER_ABI,
-          functionName: "feeds",
-          args: [assetId],
-        })) as readonly [Address, Hex];
-
-        if (isAddressEqual(source, zeroAddress)) {
-          log.info(`  [ethereum] ${label} not registered, skipping`);
-          continue;
-        }
-        feeds.push({ key: assetId, label, assetId, source, call });
+      if (isAddressEqual(source, zeroAddress)) {
+        log.info(`  [${route.label}] ${label} not registered, skipping`);
+        continue;
       }
 
+      feeds.push({
+        key: `${route.label}:${assetId}`,
+        asset: assetId,
+        label: `${route.label}:${label}`,
+        emitter: route.emitter,
+        assetId,
+        source,
+        call,
+      });
+    }
+    return feeds;
+  }
+
+  return {
+    name: "oracle-ethereum",
+
+    async loadFeeds() {
+      const feeds: EvmFeed[] = [];
+      for (const route of ROUTES) {
+        // Isolate routes: one emitter's startup failure must not take down the others.
+        try {
+          feeds.push(...(await routeFeeds(route)));
+        } catch (err) {
+          log.error(`  [${route.label}] loadFeeds failed:`, err);
+        }
+      }
       log.info(`Loaded ${feeds.length} Ethereum feeds`);
       return feeds;
     },
@@ -158,16 +173,16 @@ export function createEthereumAdapter(cfg: EthereumConfig): ChainAdapter {
     },
 
     async send(feed) {
-      const { assetId, label } = feed as EvmFeed;
+      const { emitter, assetId, label } = feed as EvmFeed;
 
       const fee = (await publicClient.readContract({
-        address: cfg.emitter,
+        address: emitter,
         abi: EMITTER_ABI,
         functionName: "quoteCrossChainCost",
       })) as bigint;
 
       const hash = await walletClient.writeContract({
-        address: cfg.emitter,
+        address: emitter,
         abi: EMITTER_ABI,
         functionName: "send",
         args: [assetId],
@@ -192,3 +207,5 @@ export function createEthereumAdapter(cfg: EthereumConfig): ChainAdapter {
     },
   };
 }
+
+boot(build);
