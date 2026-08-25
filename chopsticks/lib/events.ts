@@ -6,11 +6,29 @@ import { toJson } from "./utils";
 
 export type EventRecord = HydrationQueries["System"]["Events"]["Value"][number];
 
+type EvmLog = Extract<
+  Extract<EventRecord["event"], { type: "EVM" }>["value"],
+  { type: "Log" }
+>["value"]["log"];
+
 type Pallet = EventRecord["event"]["type"];
 
 export function findEvent(events: EventRecord[], pallet: Pallet, method: string): unknown {
   return events.find((e) => e.event.type === pallet && e.event.value.type === method)?.event.value
     .value;
+}
+
+/** Every `EVM.Log` with the given `topic0`, narrowed to one emitting contract when given. */
+export function findEvmLogs(events: EventRecord[], topic0: string, address?: string): EvmLog[] {
+  const logs: EvmLog[] = [];
+  for (const { event } of events) {
+    if (event.type !== "EVM" || event.value.type !== "Log") continue;
+    const { log } = event.value.value;
+    if (log.topics[0] !== topic0) continue;
+    if (address && String(log.address).toLowerCase() !== address.toLowerCase()) continue;
+    logs.push(log);
+  }
+  return logs;
 }
 
 export function checkIfExtrinsicSuccess(events: EventRecord[]): boolean {

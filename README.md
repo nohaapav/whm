@@ -100,13 +100,14 @@ See [migrations/README.md](migrations/README.md) for the migration model, naming
 
 ## Workspace packages
 
-| Package              | Path                  | Purpose                                      |
-| -------------------- | --------------------- | -------------------------------------------- |
-| `@whm/common`        | `common/`             | Shared TS (chains, wallet, migration)        |
-| `@whm/contracts`     | `contracts/`          | Foundry project + per-package scripts        |
-| `@whm/crates-solana` | `crates/solana/`      | Anchor workspace + per-package scripts       |
-| `@whm/broadcaster`   | `agents/broadcaster/` | Solana → Wormhole price/rate publisher       |
-| `@whm/scan`          | `agents/scan/`        | Basejump + Intents indexer + Fastify API     |
-| `@whm/relayer`       | `agents/relayer/`     | Wormhole VAA relayer (hydration-ntt, intent) |
-| `@whm/quoter`        | `agents/quoter/`      | Relay-fee quoter                             |
-| `@whm/nintent`       | `agents/nintent/`     | Intent deposit notifier (1Click)             |
+| Package              | Path                  | Purpose                                    |
+| -------------------- | --------------------- | ------------------------------------------ |
+| `@whm/common`        | `common/`             | Shared TS (chains, wallet, migration)      |
+| `@whm/contracts`     | `contracts/`          | Foundry project + per-package scripts      |
+| `@whm/crates-solana` | `crates/solana/`      | Anchor workspace + per-package scripts     |
+| `@whm/crates-near`   | `crates/near/`        | Near contracts + per-package scripts       |
+| `@whm/broadcaster`   | `agents/broadcaster/` | Wormhole price/rate publisher              |
+| `@whm/scan`          | `agents/scan/`        | Wormhole indexer (intent/basejump)         |
+| `@whm/relayer`       | `agents/relayer/`     | Wormhole VAA relayer (ntt, oracle, intent) |
+| `@whm/quoter`        | `agents/quoter/`      | Relay-fee quoter                           |
+| `@whm/nintent`       | `agents/nintent/`     | Intent deposit notifier (1Click)           |

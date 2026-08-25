@@ -32,6 +32,8 @@ packageExtensions:
   # @polkadot-api/json-rpc-provider-proxy imports `isResponse`
   # from '@polkadot-api/json-rpc-provider' without declaring the
   # dependency. Pin the required papi-2.x version explicitly.
-  "@polkadot-api/json-rpc-provider-proxy@0.4.0":
+  # Unversioned key: a proxy bump would otherwise fall back to the
+  # hoisted 0.0.1, which predates `isResponse`.
+  "@polkadot-api/json-rpc-provider-proxy":
     dependencies:
       "@polkadot-api/json-rpc-provider": "0.2.0"

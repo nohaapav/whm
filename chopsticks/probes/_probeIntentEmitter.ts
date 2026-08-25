@@ -26,7 +26,7 @@ import { h160, erc20 } from "@galacticcouncil/common";
 import { configs } from "../lib/configs";
 import { spawnForks, teardownForks, type Network } from "../lib/network";
 import { EthClient, type EthTxResult } from "../lib/eth";
-import { checkIfEthereumExecuted, checkIfEvmLog, logEvents } from "../lib/events";
+import { checkIfEthereumExecuted, checkIfEvmLog, findEvmLogs, logEvents } from "../lib/events";
 import { getEventsAt, getTokenBalance } from "../lib/queries";
 
 const { H160 } = h160;
@@ -52,6 +52,21 @@ const emitterAbi = EMITTER.abi as Abi;
 const proxyAbi = PROXY.abi as Abi;
 
 // --- Abis --------------------------------------------------------
+
+// Wormhole core — only the event `placeOrder`'s two legs land in.
+const WORMHOLE_ABI = [
+  {
+    name: "LogMessagePublished",
+    type: "event",
+    inputs: [
+      { name: "sender", type: "address", indexed: true },
+      { name: "sequence", type: "uint64", indexed: false },
+      { name: "nonce", type: "uint32", indexed: false },
+      { name: "payload", type: "bytes", indexed: false },
+      { name: "consistencyLevel", type: "uint8", indexed: false },
+    ],
+  },
+] as const;
 
 const ERC20_APPROVE_ABI = [
   {
@@ -87,6 +102,10 @@ const PK = "0xac0974bec39a17e36ba4a6b4d238ff944babceb0f7d40bef0b46e16b3c5f1b3c";
 const account = privateKeyToAccount(PK);
 
 const ORDER_PLACED = encodeEventTopics({ abi: emitterAbi, eventName: "OrderPlaced" })[0]!;
+const LOG_MESSAGE_PUBLISHED = encodeEventTopics({
+  abi: WORMHOLE_ABI as unknown as Abi,
+  eventName: "LogMessagePublished",
+})[0]!;
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -191,6 +210,22 @@ async function main(): Promise<void> {
 
     console.log(`   ${isOrderPlaced ? "✅" : "❌"} OrderPlaced emitted`);
 
+    // Both legs leave in this one call: the NTT transceiver's settlement and the emitter's own
+    // forwarding instruction. NTT carries no payload, so the destination only ever travels in the
+    // second one — a single message means the pair IntentReceiver.processOrder needs is broken.
+    const published = findEvmLogs(placeEvents, LOG_MESSAGE_PUBLISHED, WORMHOLE_CORE);
+    const senders = published.map((log) => `0x${String(log.topics[1]).slice(-40)}`.toLowerCase());
+    const fromEmitter = senders.filter((s) => s === proxyAddr.toLowerCase()).length;
+    const bothLegs = published.length === 2 && fromEmitter === 1;
+
+    console.log(
+      `   ${bothLegs ? "✅" : "❌"} ${published.length} LogMessagePublished ` +
+        `(${fromEmitter} from the emitter, ${published.length - fromEmitter} from the transceiver)`,
+    );
+    for (const sender of senders) {
+      console.log(`      sender ${sender}${sender === proxyAddr.toLowerCase() ? " (emitter)" : ""}`);
+    }
+
     // ── Did the swap move value? (race-free state reads at the swap block) ──
     const contractAcct = H160.toAccount(proxyAddr);
     const contractWeth = await getTokenBalance(hydration, contractAcct, WETH, placeOrder.blockHash);
@@ -202,7 +237,7 @@ async function main(): Promise<void> {
     console.log(`   deployer DOT  ${deployerDot} (was ${FUND.dot})`);
     console.log(`   deployer WETH ${deployerWeth} (was ${FUND.weth})`);
 
-    if (!isOrderPlaced) {
+    if (!isOrderPlaced || !bothLegs) {
       logEvents(placeEvents);
     }
   } finally {
