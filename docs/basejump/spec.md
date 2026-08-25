@@ -243,16 +243,46 @@ every corridor. Ethereum → Hydration needs:
 
 1. Hydration TC: `receiver.setAuthorizedEmitter(2, pad(<eth emitter>))` and
    `landing.setDestAsset(<eth USDC>, <hydration asset>)`.
-2. A `basejump-ethereum` migration mirroring steps 001–004 — only constants differ (manager
-   `0x447b2c7485A3d6813F8197E605b10BcCD8dd8398`, USDC `0xA0b86991…eB48`, Hydration asset 21
-   `0x…0100000015`). A new source deployment is required: the Base contract is a Base-specific
-   emitter wired to the Base EURC manager.
-3. One entry in the relayer's route list.
-4. Fund the pool.
+   `contracts/scripts/basejump-landing/addRoute.ts` prints the calldata for the second call.
+2. A source migration. A new source deployment is required per chain: the Base contract is a
+   Base-specific emitter wired to the Base EURC manager.
+3. One entry in the relayer's route list — the settlement leg only.
+4. Fund the pool in the destination asset.
 
 No `setAuthorizedBridge`, so a new corridor adds no trust surface on the pool. To wire a second
 corridor before the ownership handover, pause `basejump-base` before step 008 and append the extra
 emitter step — the runner permits appending steps, not editing or reordering.
+
+### Ethereum → Hydration (USDC) — ready
+
+[`basejump-ethereum`](../../migrations/definitions/basejump-ethereum/) exists: steps 001–004
+mirroring the Base source, plus `005-transfer-ownership@emitter`. No Hydration steps — the receiver
+from `basejump-base` serves this corridor. Run with `pnpm migrate:basejump-ethereum`.
+
+Verified on mainnet: the Ethereum USDC `NttManager` is
+`0x447b2c7485A3d6813F8197E605b10BcCD8dd8398` — `token()` = USDC `0xA0b86991…eB48`, `getMode()` =
+LOCKING (Ethereum is USDC's hub), `getPeer(73)` = `0xEcEab645…28fC`, and
+`quoteDeliveryPrice(73, hex"00")` = 0. The Hydration side is `0xEcEab645…28fC`, mode BURNING,
+`token()` = asset 21 `0x…0100000015`, `getPeer(2)` pointing back. Outbound limit 100,000 USDC/24h.
+The relayer's `NTT_ROUTES` already carries this settlement leg, so step 3 is already done.
+
+Exercised end to end on an Ethereum fork: 10 USDC in settles 10 gross to the landing and publishes
+9.9 net, with `assetFee` 100,000 (0.1 USDC) retained. The settlement logs precede the fast-path
+`LogMessagePublished` in the receipt, which is invariant 2 holding against the real manager.
+
+The pool holds **no asset 21 today** — it is EURC-only. Fund before go-live.
+
+### Arbitrum → Hydration (USDC) — blocked
+
+No NTT leg exists. `getPeer(23)` on the Hydration USDC manager is zero; its only peer is Ethereum.
+A Basejump corridor cannot settle without one, so there is no migration to write yet.
+
+Standing one up is not a Basejump change and is the harder half: USDC's NTT hub is Ethereum
+(LOCKING), so Arbitrum could only join as a **burning spoke**, which needs mint/burn authority over
+Circle-issued native Arbitrum USDC. Plus a manager + transceiver on Arbitrum, bilateral `setPeer`
+on both ends (the Hydration side is a TC call — the manager is owned by
+`0xaa7e0000000000000000000000000000000aa7e1`), and a relayer route entry. Once the leg exists the
+migration is a constants-only copy of `basejump-ethereum`.
 
 ## Adding a token
 
