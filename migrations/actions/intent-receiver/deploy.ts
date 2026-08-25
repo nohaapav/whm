@@ -7,8 +7,8 @@ import intentReceiverJson from "../../../contracts/out/IntentReceiver.sol/Intent
 import erc1967ProxyJson from "../../../contracts/out/ERC1967Proxy.sol/ERC1967Proxy.json";
 
 export type DeployParams = WalletContext & {
-  tokenBridge: `0x${string}`; // Wormhole TokenBridge on this chain
-  wrappedNative: `0x${string}`; // canonical wrapped-native (e.g. WETH) unwrapped to native on delivery
+  wormhole: `0x${string}`; // Wormhole core bridge on this chain
+  transceiver: `0x${string}`; // NTT WormholeTransceiver that delivers the settlement here
   proxy?: `0x${string}`; // when set, upgrade this existing proxy instead of deploying a new one
 };
 
@@ -19,7 +19,7 @@ export type DeployResult = {
 };
 
 export async function deploy(params: DeployParams): Promise<DeployResult> {
-  const { publicClient, walletClient, account, tokenBridge, wrappedNative, proxy } = params;
+  const { publicClient, walletClient, account, wormhole, transceiver, proxy } = params;
   const { abi, bytecode } = intentReceiverJson as ifs.ContractArtifact;
 
   const implHash = await walletClient.deployContract({
@@ -54,7 +54,7 @@ export async function deploy(params: DeployParams): Promise<DeployResult> {
   const initializeData = encodeFunctionData({
     abi,
     functionName: "initialize",
-    args: [tokenBridge, wrappedNative],
+    args: [wormhole, transceiver],
   });
 
   const { abi: proxyAbi, bytecode: proxyBytecode } = erc1967ProxyJson as ifs.ContractArtifact;

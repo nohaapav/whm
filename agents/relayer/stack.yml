@@ -1,0 +1,105 @@
+version: '3.3'
+services:
+  # One image, one service per app. The command names the entry point — nothing is selected at
+  # runtime, and each app keeps its own engine namespace, hence its own Redis state.
+  app-ntt:
+    image: galacticcouncil/relayer:latest
+    command: [node, ntt/app.js]
+    environment:
+      PRIVKEY: FILL THIS KEY ALWAYS
+      RPC_HYDRATION: https://rpc.hydradx.cloud
+      # Optional: alert sink and the multiple of one submission's cost to warn below.
+      DISCORD_WEBHOOK_URL: MAYBE FILL THIS URL OR REMOVE IT
+      GAS_WARN_MULTIPLIER: '50'
+      REDIS_HOST: redis
+      SPY_ENDPOINT: spy:7073
+      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: 'true'
+
+  app-oracle:
+    image: galacticcouncil/relayer:latest
+    command: [node, oracle/app.js]
+    environment:
+      # Writes to the receivers; a different key from app-ntt's so the two do not share a nonce.
+      PRIVKEY: FILL THIS KEY ALWAYS
+      RPC_HYDRATION: https://rpc.hydradx.cloud
+      # Optional: alert sink and the multiple of one submission's cost to warn below.
+      DISCORD_WEBHOOK_URL: MAYBE FILL THIS URL OR REMOVE IT
+      GAS_WARN_MULTIPLIER: '50'
+      REDIS_HOST: redis
+      SPY_ENDPOINT: spy:7073
+      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: 'true'
+
+  app-intent:
+    image: galacticcouncil/relayer:latest
+    command: [node, intent/app.js]
+    environment:
+      # Reimbursed wallet; again its own key.
+      PRIVKEY: FILL THIS KEY ALWAYS
+      RPC_ETHEREUM: https://ethereum-rpc.publicnode.com
+      RPC_HYDRATION: https://rpc.hydradx.cloud
+      QUOTER_URL: http://quoter:8080 # reachable quoter service (deployed separately)
+      # Optional: alert sink and the multiple of one submission's cost to warn below.
+      DISCORD_WEBHOOK_URL: MAYBE FILL THIS URL OR REMOVE IT
+      GAS_WARN_MULTIPLIER: '50'
+      REDIS_HOST: redis
+      SPY_ENDPOINT: spy:7073
+      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: 'true'
+
+  redis:
+    image: redis:latest
+    volumes:
+      - db22:/data
+    networks:
+      - default
+    logging:
+      driver: json-file
+
+  spy:
+    image: ghcr.io/wormhole-foundation/guardiand:latest
+    command:
+      - spy
+      - --nodeKey
+      - /node.key
+      - --spyRPC
+      - '[::]:7073'
+      - --network
+      - /wormhole/mainnet/2
+      - --bootstrap
+      - /dns4/wormhole-v2-mainnet-bootstrap.xlabs.xyz/udp/8999/quic/p2p/12D3KooWNQ9tVrcb64tw6bNs2CaNrUGPM7yRrKvBBheQ5yCyPHKC,/dns4/wormhole.mcf.rocks/udp/8999/quic/p2p/12D3KooWDZVv7BhZ8yFLkarNdaSWaB43D6UbQwExJ8nnGAEmfHcU,/dns4/wormhole-v2-mainnet-bootstrap.staking.fund/udp/8999/quic/p2p/12D3KooWG8obDX9DNi1KUwZNu9xkGwfKqTp2GFwuuHpWZ3nQruS1
+    networks:
+      - default
+    logging:
+      driver: json-file
+      options:
+        max-size: 1000m
+
+networks:
+  default:
+    driver: overlay
+
+volumes:
+  # Reuses the existing volume: the engine namespaces are unchanged, so the queue and the
+  # missed-VAA cursors carry straight over from mrelayer.
+  db22:
+    driver: local

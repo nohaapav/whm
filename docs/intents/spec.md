@@ -1,204 +1,442 @@
-# Intents
+# SPEC — Intents: Hydration → NEAR Intents
 
-## Abstract
+Hydration users acquire any NEAR-Intents-supported asset (BTC, ZEC, NEAR, …). Their asset is sold
+for WETH on Hydration, settled to Ethereum over NTT, and forwarded into a **deposit address** that
+NEAR Intents credits. What varies is only where that deposit address comes from.
 
-Hydration users hold assets and want assets on chains Hydration doesn't reach — Bitcoin, Zcash, Solana SPLs, NEAR-native tokens. NEAR Intents already settles swaps across all of these chains through the Defuse / OneClick flow. Near Intents Bridge connects the two: a single Hydration extrinsic swaps the user's chosen Hydration asset to WETH, bridges it to Ethereum via Moonbeam + Wormhole, and forwards native ETH into the quote-specific `depositAddress` returned by the OneClick API. After that deposit tx lands, `nintent` calls `submitDepositTx({ depositAddress, txHash })` so the quoted swap can continue and a solver delivers the destination asset (e.g. ZEC) to the user's wallet on the destination chain.
+## Two variants, one API
 
-## Two delivery variants — WTT (deployed) and BJP
+Both call the same entry point, and **the contracts cannot tell them apart** — `depositAddress` is
+just an address:
 
-The Moonbeam→Ethereum leg has two implementations, chosen by how fast the **source** chain finalizes (see [relay-fee.md](relay-fee.md) for the full comparison):
+```solidity
+placeOrder(assetIn, amountIn, minEthOut, depositAddress, maxRelayFee)
+```
 
-| | **WTT** — Wrapped-Token-Transfer (**deployed**) | **BJP** — Basejump pooled (alternative) |
-| --- | --- | --- |
-| Transport | Wormhole **TokenBridge** `transferTokensWithPayload` (payload-3) | `BasejumpProxy.bridgeViaWormhole` (fast VAA + slow TokenBridge replenish) |
-| Wormhole messages | **1** | **2** |
-| Destination liquidity | None — tokens delivered straight through | Pre-funded landing pool fronts; slow transfer replenishes |
-| Ethereum contract | `IntentReceiver` (`redeem`) | `Basejump` → `BasejumpLandingNative` → `IntentRouter` |
-| Hydration contract | `IntentEmitterWtt` | `IntentEmitterBjp` |
-| Relayer | **Permissionless** market, `maxRelayFee` ceiling | Permissioned trusted bot, gated pool reimbursement |
-| When it wins | Source finalizes fast (Moonbeam → seconds) | Source finality slow |
+**1Click.** The deposit address is minted by a quote, one per swap. It expires, the rate floor is
+frozen inside it, and getting one needs an HTTP call and a user to authorize the destination. Nothing
+beyond the shared transport is required. Implemented.
 
-**This spec documents WTT** — the deployed path (`nintent-ethereum` migration). Moonbeam finalizes in ~seconds, so fronting liquidity from a pre-funded pool to beat slow source finality buys nothing for this direction; the direct TokenBridge transfer is simpler and self-policing. The BJP variant (`IntentEmitterBjp`, `IntentRouter`, the Basejump landing pool — see [basejump/spec.md](../basejump/spec.md)) remains in the codebase for source chains where finality is slow enough to need the pooled fast-path; it is not the deployed intents path. Both emitters share the abstract [`IntentEmitter`](../../contracts/src/intents/IntentEmitter.sol) base (swap + fee + XCM batch + dispatch) and differ only in the `_bridgeViaWormholeCall` hook.
+**MPC-derived.** The deposit address is derived — `path → A → 0xN` — and is permanent, deterministic,
+and reusable for every fill. One user signature at schedule creation covers all of them; the rate
+floor is enforced per fill on NEAR instead of being frozen up front. Costs two extra pieces:
+`IntentQuoteEmitter` on Hydration and `IntentRouter` on NEAR. The Hydration side is implemented; the
+router is not built.
 
-## Overview
+Everything up to and including the Ethereum forward is **shared** — see
+[Shared transport](#shared-transport) below.
 
-The bridge composes two systems: the **Wormhole TokenBridge** (a payload-carrying token transfer, Moonbeam → Ethereum) and **NEAR Intents / Defuse OneClick** (origin-chain deposits → quoted destination asset, solver settled). On Hydration, the `IntentEmitterWtt` contract, in one atomic extrinsic via the DISPATCH precompile: (1) buys a fixed GLMR cross-chain fee and swaps the rest of the user's asset to WETH on the Hydration router, then (2) dispatches `batch_all([reserve-transfer WETH+GLMR to its Moonbeam MDA, send→Transact])`. The Transact runs **as the MDA** on Moonbeam and, through the Batch precompile, approves the Wormhole TokenBridge and calls `transferTokensWithPayload(WETH, ethOut, Ethereum, IntentReceiver, nonce=0, payload = (intentId, depositAddress, maxRelayFee))` — a single guardian-signed VAA carrying both the WETH and the intent payload. On Ethereum any relayer calls `IntentReceiver.redeem(vaa, feeRequested)`: the TokenBridge releases the WETH to the receiver, which unwraps it to native ETH, pays the relayer `feeRequested` (bounded by the user-signed `maxRelayFee` ceiling in the payload), and forwards the rest to the OneClick `depositAddress`. The off-chain `mrelayer` submits the VAA (pulling its fee from the `quoter` service); `nintent` then nudges OneClick's deposit detector. The user obtains a live OneClick quote off-chain for `originAsset = ETH.eth`; everything after `IntentEmitterWtt.swapAndBridge(...)` is automated.
+The variants diverge only after the funds land at the deposit address:
 
-## V1 Scope
+- **1Click** — the quote's solver network settles it. `nintent` nudges 1Click so the deposit is
+  noticed promptly. Nothing else is needed.
+- **MPC-derived** — POA credits the derived NEAR account `A`, and `IntentRouter` swaps and delivers
+  under the authority of a published order. **§1 onward covers only this variant.**
 
-- Two new contracts (WTT path):
-  - `IntentEmitterWtt` on Hydration — swaps any Hydration asset → WETH and bridges it through the Wormhole TokenBridge with a payload, in one extrinsic
-  - `IntentReceiver` on Ethereum — redeems the payload-3 VAA, unwraps WETH → native ETH, pays the relay fee, and forwards native ETH to the quote deposit address
-- Source asset (user side): **any Hydration asset** `A` the router can sell to WETH (GLMR and WETH are special-cased). The bridged/origin asset for the quote is **ETH** (WETH on Hydration/Moonbeam → native ETH at the deposit address).
-- Asset + trigger transport: **XCM reserve-transfer** Hydration → Moonbeam (WETH + GLMR to the emitter's MDA), then a **single** Wormhole **TokenBridge** `transferTokensWithPayload` Moonbeam → Ethereum. One message carries both the WETH and the `(intentId, depositAddress, maxRelayFee)` payload — no separate fast/slow legs, no pool.
-- Intent hop: Ethereum ETH → OneClick quote deposit → NEAR Intents → destination asset on destination chain
-- Quote model: `OneClickService.getQuote(originAsset = ETH.eth, ...)` returns quote details plus a quote-specific `depositAddress` on Ethereum
-- Completion model: OneClick auto-detects deposits on `depositAddress` and starts processing on receipt; `OneClickService.submitDepositTx({ depositAddress, txHash })` is an optional latency optimization (~poller interval → ~seconds)
-- Payload: the TokenBridge transfer carries a 96-byte payload `(bytes32 intentId, address depositAddress, uint256 maxRelayFee)`, authenticated end-to-end inside the guardian-signed VAA
-- Native unwrap: `IntentReceiver` unwraps the delivered token to native ETH **only when** it equals the configured `wrappedNative` (WETH); any other delivered token is forwarded as the delivered ERC20 (graceful degrade, never bricks)
-- Relay fee: charged on the **destination**, native-in/native-out (no FX). The relayer names `feeRequested`; the contract enforces `feeRequested ≤ maxRelayFee` and forwards `amount − feeRequested`. Permissionless market; an optional `authorizedRelayer` allowlist grants a 5-minute exclusivity window per VAA before redemption opens to anyone (liveness fallback). See [relay-fee.md](relay-fee.md).
-- `redeem` is **permissionless and replay-safe** — the payload (not the caller) dictates the destination; the TokenBridge restricts completion to the encoded recipient and marks the VAA consumed
-- Single `nintent` headless keeper: watches `IntentForwarded` events on `IntentReceiver` and calls `OneClick.submitDepositTx({ depositAddress, txHash })` as a latency optimization. OneClick auto-detects deposits without it; nintent just makes detection ~seconds instead of one poller interval. No HTTP API, no quote-path involvement, no per-quote registry. Quote acquisition is UI ↔ OneClick direct. Failure unwind is operator-driven outside the agent.
-- Supported destinations: any NEAR Intents-listed asset/chain pair supported by the quote API (ZEC/Zcash, BTC/Bitcoin, NEAR/NEAR, …)
-- No on-chain failure handling — happy path only; expired or rejected quotes are unwound off-chain (see [refund.md](refund.md))
-- No shared NEAR recipient account in the NIR path — the quote's origin-chain `depositAddress` is used directly
+### Why the MPC variant exists
 
-## Architecture
+The 1Click variant needs a fresh quote per swap, which means an HTTP call in the critical path and a
+user present to authorize the destination. Neither works for an on-chain DCA firing unattended for
+weeks. The MPC variant replaces the per-swap quote with a **standing authorization**: one
+guardian-signed message says "any balance in this account may be swapped to `destinationAsset` and
+delivered to `recipient`", and every tranche reuses it.
 
-Four layers — Hydration entry (`IntentEmitterWtt`: swap + dispatch), the Moonbeam hop (the emitter's MDA approves + calls the Wormhole TokenBridge), Ethereum delivery (`IntentReceiver.redeem`), and the off-chain actors (`mrelayer` redeems the VAA, `nintent` nudges OneClick). The asset and the trigger travel the **same** route as a **single** Wormhole message (Hydration → Moonbeam → Wormhole TokenBridge → Ethereum).
+An off-chain bot may relay, but a fully compromised bot must not be able to redirect funds — which is
+the constraint the rest of this document is built around.
 
-### Hydration — `IntentEmitterWtt`
+---
 
-The entry point on Hydration. Holds no liquidity in the happy path. Swaps the user's asset to WETH, reserves a GLMR fee for the cross-chain hop, and dispatches the bridge — all in one extrinsic through the DISPATCH precompile (`0x0401`). UUPS-upgradeable; extends the abstract [`IntentEmitter`](../../contracts/src/intents/IntentEmitter.sol).
+## Shared transport
 
-**Storage / config:**
+Identical for both variants. Two Wormhole messages leave the same Hydration transaction, because NTT
+carries no payload of its own — the destination has to travel separately.
 
-- `owner` / `xcmOperators` — owner controls upgrades and path wiring; xcm operators tune fee/gas params
-- `tokenBridge` — address (H160) of the Wormhole **TokenBridge** on Moonbeam (the MDA approves + calls it)
-- `intentReceiver` — `bytes32` Wormhole recipient: the Ethereum `IntentReceiver` the payload-3 transfer targets
-- `xcmSource` — the emitter's Moonbeam **MDA** (derived sibling-EVM AccountId32 → H160), computed at init; the assets are reserve-transferred to it and the Transact runs as it
-- `xcmFee` / `xcmExecutionFee` / `xcmGasLimit` / `xcmTransactRefTime` / `xcmTransactProofSize` — XCM transport/weight parameters (operator-tunable via `setXcmParams`)
-- constant `ETHEREUM_WORMHOLE_ID = 2`
+```
+HYDRATION   IntentEmitter.placeOrder(assetIn, amountIn, minEthOut, depositAddress, maxRelayFee)
+              1. sell assetIn → WETH via the router   (no-op when assetIn is already WETH)
+              2. deduct cost = NTT deliveryPrice + wormhole messageFee, from the swap output
+              3. quantize to TRIM_UNIT (1e10) — NTT trims to 8dp, WETH is 18dp
+              4. nttManager.transfer(amount, 2, IntentReceiver)   → transferSequence
+              5. wormhole.publishMessage(abi.encode(
+                     transferSequence, depositAddress, amount, maxRelayFee))
+              → emits OrderPlaced
 
-**`swapAndBridge(uint32 assetIn, uint256 amountIn, uint256 minEthOut, uint256 maxFeeIn, bytes32 intentId, address intentDepositAddress, uint256 maxRelayFee)`** — single user entry. In one extrinsic:
+ETHEREUM    IntentReceiver.processOrder(nttVaa, instructionVaa, feeRequested)
+              1. verify the instruction (guardian quorum, emitter pinned to chain 73 + address)
+              2. require instruction.sequence == settlement's NTT manager sequence
+              3. require feeRequested <= maxRelayFee
+              4. deliver the settlement through the transceiver, unless already delivered
+              5. forward (amount - feeRequested) to depositAddress; pay the caller its fee
+              → emits OrderProcessed, RelayFeePaid
+```
 
-1. Pulls `amountIn` of asset `A` (`assetIn`) from the caller.
-2. **Swap** (`_swap`): reserve the fixed `xcmFee` of GLMR for the hop, then convert the rest of `A` to WETH on the Hydration router.
-   - `A == GLMR`: withhold `xcmFee`, sell `amountIn − xcmFee` → WETH.
-   - else: buy `xcmFee` GLMR with `A`, spending at most `maxFeeIn` of `A` (caller's fee-leg slippage bound); then sell the caller's leftover `A` → WETH (skipped when `A == WETH`).
-3. Slippage check: `wethOut` (WETH produced this call) must be `≥ minEthOut`, else revert `InsufficientOutput`.
-4. **Bridge** (`_bridge`): DISPATCH `utility.batch_all([` `polkadotXcm.transfer_assets_using_type_and_then` (reserve-transfer `[GLMR fee, WETH]` to the MDA on Moonbeam)`,` `polkadotXcm.send` → Transact **as the MDA** running Moonbeam's Batch precompile: `WETH.approve(tokenBridge, ethOut)` then `TokenBridge.transferTokensWithPayload(WETH, ethOut, ETHEREUM_WORMHOLE_ID, intentReceiver, nonce=0, abi.encode(intentId, intentDepositAddress, maxRelayFee))` `])`.
-5. Emits `BridgeInitiated(intentId, caller, assetIn, amountIn, ethOut, intentDepositAddress)`.
+**Why two messages and not one.** The Wormhole TokenBridge's `transferTokensWithPayload` carries a
+payload _and_ restricts redemption to the named recipient. NTT does neither: it has no payload field,
+and `receiveMessage` is permissionless. So the destination rides its own message, and the two are
+bound by the **NTT manager's sequence** — not a Wormhole sequence, and not chain-global. Pairing a
+settlement with someone else's instruction fails that check.
 
-If any step fails the whole extrinsic reverts — no partial state. Only the caller's own `A` is swapped; stray/donated `A` resident in the contract is left untouched. See [fee.md](fee.md) for sizing `amountIn` / `minEthOut` / `maxFeeIn` / `maxRelayFee`.
+**Why delivery is atomic with the forward.** Because NTT delivery is permissionless, a generic
+relayer can deliver a settlement before we do — funds would then sit in the receiver with nothing to
+move them. `processOrder` handles both cases in one call: it delivers if needed, then forwards. Since
+the caller does all of it, the caller is the one paid, so there is nothing to snipe.
 
-### Moonbeam hop — the emitter's MDA + Wormhole TokenBridge
+**Why the fee ceiling is a caller argument.** `maxRelayFee` is committed per order rather than set by
+an operator. Paired with a colluding relayer, a ceiling is a claim on the order's value, so it
+belongs to whoever's funds are at risk. A scheduler stores it alongside `depositAddress`, so placing
+an order still needs nothing off-chain.
 
-The reserve-transfer credits the emitter's **Multilocation Derived Account** (`xcmSource`) on Moonbeam with the WETH + GLMR, and the `send` leg's Transact executes _as that MDA_ (sovereign origin). The Batch precompile, as the MDA:
+**Not payable.** Both fees come out of the swap output, which works only because Hydration's native
+currency _is_ WETH — one balance behind two interfaces. That is what lets an on-chain scheduler place
+an order with no funding step.
 
-1. `WETH.approve(tokenBridge, ethOut)`
-2. `TokenBridge.transferTokensWithPayload(WETH, ethOut, ETHEREUM_WORMHOLE_ID, intentReceiver, nonce=0, payload)` — locks the WETH on Moonbeam and publishes a **single** payload-3 Wormhole message (`LogMessagePublished`) whose recipient is the Ethereum `IntentReceiver` and whose payload is `(intentId, depositAddress, maxRelayFee)`.
+Relaying is [`agents/relayer`](../../agents/relayer/)'s `intent` feature: it subscribes to the
+Hydration WETH transceiver, finds the instruction in the source transaction's `LogMessagePublished`
+logs, prices the fee via [`quoter`](../../agents/quoter/), and submits. Retries ride the relayer
+engine's Redis-backed backoff; an order stale beyond the age cap is dropped rather than retried
+forever.
 
-One message both moves the value and carries the intent — there is no second leg, no pool to keep solvent, and nothing to replenish. The WETH crosses as the canonical Wormhole-wrapped asset and is delivered to the receiver on redemption.
+---
 
-### Ethereum — `IntentReceiver`
+## 1. Rejected approaches
 
-A single Ethereum contract that holds no liquidity in the happy path — it redeems, unwraps, pays the relayer, and forwards. UUPS-upgradeable. Initialized with `(tokenBridge, wrappedNative)`.
+Five ways to make the **unattended** case work without MPC derivation, all tested against the live
+APIs, all dead. Recorded so nobody re-litigates them.
 
-**Storage:**
+None of this is a criticism of 1Click. The 1Click variant is in production and is the right tool when
+a user is present: they request the quote, they see the destination, and the address only has to
+survive one swap. Every problem below comes from removing the user, not from 1Click.
 
-- `owner`
-- `tokenBridge` — the Ethereum Wormhole TokenBridge used to complete the transfer
-- `wrappedNative` — the canonical wrapped-native (WETH) that is unwrapped to native ETH on delivery; any other delivered token is forwarded as-is
-- `authorizedRelayer` / `authorizedRelayerCount` — optional relayer allowlist (see exclusivity window below)
-- constants: `NATIVE` sentinel (matches the native-ETH payout marker), `EXCLUSIVE_WINDOW = 5 minutes`
+**A fresh 1Click quote per tranche** needs an HTTP call inside the critical path of an on-chain
+schedule — which an on-chain schedule cannot make. Delegating it to a bot moves the problem rather
+than solving it: whoever requests the quote picks `recipient`, and with no user in the loop nothing
+checks that choice. A compromised bot would redirect funds at the source, before any on-chain rule
+could object. In the user-present flow the user _is_ that check.
 
-**`redeem(bytes vaa, uint256 feeRequested)`** — permissionless. In one transaction:
+**Pre-minting N addresses at schedule creation** freezes `minAmountOut` at quote time. Late tranches
+then execute against a stale floor and refund instead of filling. It also cannot express a rolling,
+unbounded-N schedule.
 
-1. **Freshness guard** — `parseVM(vaa)`; revert `AlreadyRedeemed` if `tokenBridge.isTransferCompleted(hash)` (cheap check before the expensive signature verification).
-2. **Complete** — `tokenBridge.completeTransferWithPayload(vaa)` releases the token to this contract and returns the `TransferWithPayload` body. The TokenBridge enforces that the recipient encoded in the VAA is this contract and marks the VAA consumed (replay-safe).
-3. Resolve the **delivered** ERC20 (canonical token if home-chain, else the wrapped form) and read `amount = balanceOf(delivered)` — the receiver holds no liquidity between redeems, so its balance _is_ what this VAA released. Revert `NothingDelivered` if zero.
-4. Require `payload.length == 96`; decode `(intentId, depositAddress, maxRelayFee)`; require `depositAddress != 0` (else `MalformedPayload`).
-5. **Exclusivity window** — if `authorizedRelayerCount > 0` and the caller is not an authorized relayer, require `block.timestamp ≥ vaa.timestamp + EXCLUSIVE_WINDOW` (else `Unauthorized`). While the allowlist is empty, redemption is fully permissionless at any time.
-6. **Fee** — require `feeRequested ≤ maxRelayFee` (else `FeeExceedsCeiling`); `forwardAmount = amount − feeRequested`.
-7. **Settle in the delivered asset** — if `delivered == wrappedNative`, `withdraw` it to native ETH and set `asset = NATIVE`; otherwise forward the delivered ERC20 (`asset = delivered`).
-8. `_pay(asset, depositAddress, forwardAmount)` and emit `IntentForwarded(intentId, asset, depositAddress, forwardAmount)`.
-9. If `feeRequested > 0`, `_pay(asset, msg.sender, feeRequested)` and emit `RelayFeePaid(intentId, msg.sender, feeRequested)`.
+**Reusing one 1Click address** is impossible: they are non-deterministic. Byte-identical requests
+return different addresses in all three deposit modes, so nothing can re-derive one.
 
-Any revert in this path bubbles up and reverts the whole `redeem`, leaving the VAA **redeemable for retry** (it is only marked consumed on success). Funds are never stranded — the WETH stays locked on Moonbeam against an unredeemed VAA until a successful redeem.
+**An `ANY_INPUT` collector** only sweeps once a pool clears $1,000, and is `INTENTS`-only —
+`400 "ANY_INPUT only supports depositType INTENTS or CONFIDENTIAL_INTENTS"` — so Wormhole cannot
+deliver into it at all.
 
-**`sweep(asset, to, amount)`** — owner-only escape hatch for stuck funds (native ETH via the `NATIVE` sentinel, or stray tokens). **`setOwner` / `setWrappedNative` / `setAuthorizedRelayer`** — owner-only wiring.
+**Letting the bot hold the intents key** fails on `intents.near` having no per-key scoping: _"Every
+public key registered to an account can sign intents on its behalf."_ A key is unbounded authority,
+so a compromised bot could withdraw anywhere.
 
-### Off-chain — `mrelayer` (redeem) + `nintent` (deposit nudge)
+MPC derivation is what remains, and it removes the key from every human-operated component.
 
-Two headless TypeScript services, structured like the existing `agents/*` packages and bundled to a single `dist/index.js`.
+---
 
-**`mrelayer`** ([app-intent.ts](../../agents/mrelayer/src/app-intent.ts)) — the VAA relayer for the WTT path. Polls Wormhole for payload-3 transfers to Ethereum addressed to the configured `IntentReceiver`, fetches a `feeRequested` from the `quoter` service (sized against the live Ethereum gas cost, bounded by the VAA's `maxRelayFee`), and calls `IntentReceiver.redeem(vaa, feeRequested)`. Redemption is a permissionless race: the first `redeem` to land wins (the TokenBridge marks the VAA consumed) and losing txs revert with `AlreadyRedeemed`. The operator runs `mrelayer` as the backstop relayer for liveness; anyone may also relay. Relay-fee economics: [relay-fee.md](relay-fee.md).
+## 2. Architecture
 
-**`nintent`** ([watcher.ts](../../agents/nintent/src/watcher.ts)) — subscribes to `IntentForwarded(intentId, asset, depositAddress, amount)` on `IntentReceiver`, captures `depositAddress` and the Ethereum tx hash from the event, and calls `OneClickService.submitDepositTx({ depositAddress, txHash })` (deduped by `(txHash, depositAddress)`).
+Two independent paths leave Hydration: **funds go to Ethereum, the authorization
+message goes to NEAR.** They meet only inside the router.
 
-`submitDepositTx` is **not required for the swap to complete** — OneClick polls the origin chain for the `depositAddress` it issued and starts processing on receipt automatically. `nintent` only compresses detection latency from a poller interval to ~seconds. It exposes no HTTP API and stores no per-quote registry; the UI talks to OneClick directly for quote acquisition and status polling. If `nintent` is down, swaps still complete — just slower.
+```
+═══ PHASE 1 · dispatch ═══════════════════════════════════════════════════
 
-Operator-driven failure unwind (expired quote, rejected deposit) is a manual process handled outside the agents in V1. See [refund.md](refund.md).
+ HYDRATION  (on-chain, autonomous — no off-chain dependency)
+   DCA tranche fires
+     ├── IntentEmitter.placeOrder(…, 0xN, relayFee) ─►  VALUE PATH ┐
+     │     sell for WETH, settle over NTT + publish the            │
+     │     forwarding instruction (see Shared transport)           │
+     │                                                             │
+     └── IntentQuoteEmitter.publishQuote(Quote) ────► MESSAGE PATH ┼─┐
+           once per route, not per tranche                         │ │
+                                                                   │ │
+ ETHEREUM                                          ◄───────────────┘ │
+   IntentReceiver.processOrder → forwards native ETH to 0xN          │
+     │                                                               │
+     │ POA bridge watcher — not our transaction                      │
+     ▼                                                               │
+ NEAR  (on-chain)                                                    │
+   intents acct A credited with nep141:eth.omft.near                 │
+                                                                     │
+ NEAR  (Wormhole core)                             ◄─────────────────┘
+   guardians sign → VAA available to anyone
+   published once per order; the bot resubmits the same VAA every tranche
 
-**Intent ID** = local correlation hash computed by the UI from the accepted quote, for example:
+═══ PHASE 2 · authorize & settle ═════════════════════════════════════════
 
-`keccak256(abi.encode(quoteId, depositAddress, srcAmount, destAsset, destRecipient, deadline, nonce))`
+ OFF-CHAIN BOT  (untrusted, holds no keys)
+   sees balance > 0 → quote → quote_hash ──────────────────┐
+                                                           ▼
+ NEAR  IntentRouter.finalize(vaa, quote_hash, amount_out)
+   1. verify VAA + emitter (chain 73 + address)
+   2. recipient := vaa.payload          ← never a caller argument
+   3. require amount_out ≥ floor
+   4. v1.signer.sign(...)               [async, MPC]
+   5. emit signed MultiPayload ─────────────────────────────┐
+                                                            ▼
+ OFF-CHAIN BOT
+   publish_intent(quote_hashes, signed_data) ───────────────┐
+                                                            ▼
+ NEAR  intents.near
+   relay pairs our intent with the solver's → settles → ft_withdraw
+                                                            │
+ ZCASH                                                      ▼
+   ZEC arrives at the recipient carried in the VAA
+```
 
-The same hash is used as:
+> **The POA step is not a transaction we build.** `0xN` is POA's deposit address
+> for account `A`; sending native ETH there _is_ the deposit into NEAR Intents,
+> and POA's off-chain watcher does the crediting.
+>
+> One asset, two ends — POA states the mapping directly:
+>
+> ```json
+> {
+>   "defuse_asset_identifier": "eth:1:native",
+>   "origin_chain_address": "native",
+>   "near_token_id": "eth.omft.near",
+>   "intents_token_id": "nep141:eth.omft.near"
+> }
+> ```
+>
+> You deliver native ETH on Ethereum; the tradeable claim exists on NEAR as
+> `nep141:eth.omft.near`. The ETH itself stays custodied on Ethereum — ordinary
+> lock-and-mint. This is already true of every phase-1 swap; 1Click just hides it
+> behind a per-quote address. The only change here is that the address is bound to
+> an account we derive rather than to a throwaway quote.
+>
+> It cannot be otherwise: the intents ledger and every solver live on NEAR, so the
+> claim must exist inside `intents.near` before a solver can trade it for ZEC.
+>
+> (Note the registry distinguishes `nep141:eth.omft.near` — `blockchain: "eth"`,
+> delivered on Ethereum — from `nep141:eth.bridge.near`, `blockchain: "near"`.
+> The `nep141:` prefix denotes the token standard, not where you deposit.)
 
-- the `intentId` argument to `IntentEmitterWtt.swapAndBridge(...)` and in the TokenBridge payload, carried end-to-end into `IntentReceiver.redeem`
-- the first field of the `BridgeInitiated` (Hydration) and `IntentForwarded` (Ethereum) events, observable on-chain
-- the correlation key in logs and analytics (joining Hydration `BridgeInitiated`, the Moonbeam `LogMessagePublished` sequence, Ethereum `IntentForwarded`, and OneClick status records off-chain)
+The trust boundary is the VAA. `recipient` is read from guardian-signed bytes
+verified inside the contract on every call, never from a caller argument and never
+from mutable storage. The router holds no order state to protect.
 
-### NEAR side — third-party
+### Why a compromised bot cannot steal
 
-Near Intents Bridge does not deploy anything on NEAR. It relies on the existing quote / deposit pipeline:
+- It cannot forge a VAA — that needs a Wormhole guardian quorum.
+- It cannot alter `recipient` — the router re-reads it from the verified VAA on every call.
+- It cannot request an MPC signature — only the router's code can, and only over
+  a payload built from a verified VAA.
+- It cannot mutate the signed intent — any edit invalidates the Ed25519 signature.
+- VAA relay is permissionless, so withholding is weak censorship: anyone can relay.
 
-| Component                   | Role                                                                   |
-| --------------------------- | ---------------------------------------------------------------------- |
-| Defuse / OneClick quote API | Returns quote details, `depositAddress`, and accepts `submitDepositTx` |
-| `intents.near`              | Solver settlement and destination execution                            |
-| Solvers                     | Provide destination asset (ZEC, BTC, …) on destination chain           |
+Residual powers: **stall**, and **choose which solver quote** (see §6).
 
-## Flow
+---
 
-See [schema.md](schema.md) for full chain-hop diagrams.
+## 3. Key derivation and the constant address
 
-End-to-end happy path:
+No private key for the intents account exists anywhere. It is MPC-derived.
 
-1. **Quote** — the UI calls the Defuse / OneClick API directly for `ETH.eth → destination asset`. The API returns quoted output, expiry, and `quote.depositAddress` on Ethereum (plus optional memo).
-2. **Accept** — user reviews and accepts the live quote in the UI. The UI computes the local `intentId` and sizes `amountIn` / `minEthOut` / `maxFeeIn` / `maxRelayFee` (see [fee.md](fee.md) and [relay-fee.md](relay-fee.md)). `nintent` is not involved.
-3. **Hydration atomic dispatch** — user calls `IntentEmitterWtt.swapAndBridge(assetIn, amountIn, minEthOut, maxFeeIn, intentId, depositAddress, maxRelayFee)`. In one extrinsic the emitter buys the GLMR fee, swaps `A → WETH`, and dispatches `batch_all([reserve-transfer WETH+GLMR → MDA, send→Transact])`. Emits `BridgeInitiated`.
-4. **Moonbeam → Wormhole** — the Transact runs as the MDA and calls `TokenBridge.transferTokensWithPayload(WETH, ethOut, ETHEREUM_WORMHOLE_ID, IntentReceiver, nonce=0, payload)`, locking the WETH and publishing a single payload-3 VAA (`LogMessagePublished`).
-5. **Ethereum redeem** — `mrelayer` picks up the VAA, fetches `feeRequested` from the `quoter`, and calls `IntentReceiver.redeem(vaa, feeRequested)`: the TokenBridge releases the WETH, the receiver unwraps it to native ETH, pays the relayer `feeRequested`, and forwards `amount − feeRequested` to `depositAddress`. Emits `IntentForwarded(intentId, NATIVE, depositAddress, forwardAmount)` (and `RelayFeePaid`).
-6. **Submit deposit tx (optional speedup)** — `nintent` observes `IntentForwarded`, reads `depositAddress`, and calls `OneClickService.submitDepositTx({ depositAddress, txHash })`. If `nintent` is unavailable, OneClick still picks up the deposit via its own poller.
-7. **Quote processing** — the quote service detects the deposit and starts the quoted NEAR Intents flow.
-8. **Solver fulfills** — solver delivers the destination asset to the user's destination-chain address.
+**Two separate calls, and the router account appears only in the first.** POA has
+no idea the router exists — it only ever sees `A`.
 
-## Interface
+```
+MPC   derived_public_key({ predecessor: "intents-router.hydration.near",
+                           path: "dca-1", domain_id: 1 })   ← router goes HERE
+        → ed25519:2kbv31BMDHBK54RYMX1gKiSLCXMjWphF9sbxvH4o4D3S
+        → A = 1a0723b8ff06ee3a7db5d855150156a7dfdbedeabb6b386d3c57c93c665829f5
 
-- `IIntentEmitter` (Hydration) — `swapAndBridge(uint32 assetIn, uint256 amountIn, uint256 minEthOut, uint256 maxFeeIn, bytes32 intentId, address intentDepositAddress, uint256 maxRelayFee)`; event `BridgeInitiated(bytes32 intentId, address caller, uint32 assetIn, uint256 amountIn, uint256 ethOut, address intentDepositAddress)`; admin `setOwner`/`setXcmOperator`/`setXcmParams`. The WTT variant adds `setTokenBridge`/`setIntentReceiver`; `maxRelayFee` is embedded in the payload by WTT and ignored by BJP.
-- `IIntentReceiver.sol` (Ethereum, WTT) — `redeem(bytes vaa, uint256 feeRequested)`; events `IntentForwarded(bytes32 intentId, address asset, address depositAddress, uint256 amount)`, `RelayFeePaid(bytes32 intentId, address relayer, uint256 fee)`, `Swept`, `WrappedNativeUpdated`, `RelayerAuthorized`; admin `setOwner`/`setWrappedNative`/`setAuthorizedRelayer`/`sweep`. The TokenBridge payload MUST decode to `(bytes32 intentId, address depositAddress, uint256 maxRelayFee)` (96 bytes).
-- `nintent` exposes no public HTTP API. It is a headless event-driven keeper: chain subscription in, `submitDepositTx` out. Operator-facing logs and metrics only. The UI talks to OneClick directly for both quote acquisition and status polling.
-- (BJP alternative, not deployed) `IBasejumpReceiver.sol` + `IIntentRouter.sol` — the Basejump-path receiver surface; see [basejump/spec.md](../basejump/spec.md).
+POA   deposit_address({ account_id: A, chain: "eth:1" })     ← only A, never the router
+        → 0x43F3DB4993C0452109ccd8D346AE276627A1D2b7
+```
 
-## Fees
+Step by step:
 
-Full breakdown and sizing guidance: **[fee.md](fee.md)** (the swap + transport legs) and **[relay-fee.md](relay-fee.md)** (the destination relay fee). In short, value crosses these charged surfaces:
+1. `v1.signer.derived_public_key({predecessor, path, domain_id: 1})` → Ed25519 pubkey.
+   `domain_id: 1` selects Ed25519; `0` is Secp256k1.
+2. NEAR implicit account id `A` = lowercase hex of that pubkey's 32 bytes (base58-decode
+   the part after `ed25519:`). Self-registering with `intents.near` — the account id _is_
+   the public key, so no setup transaction and no registration.
+3. POA: `deposit_address({account_id: A, chain: "eth:1"})` → `0xN`. Permanent and
+   deterministic; verified stable across repeated calls and distinct per account.
+4. `0xN` is stored in the DCA schedule at creation. The on-chain leg never needs
+   another off-chain call.
 
-- **`xcmFee` (GLMR transport)** — bought from `A` on Hydration, bounded by the caller's `maxFeeIn`. Pays the XCM arrival + remote `BuyExecution` (`xcmExecutionFee`). Operator-tunable.
-- **`minEthOut` (swap floor)** — caller's slippage bound on the WETH the Hydration swap produces (the amount bridged).
-- **`maxRelayFee` (destination relay ceiling)** — user-signed ETH ceiling carried in the VAA payload. The relayer claims `feeRequested ≤ maxRelayFee` on redemption (paid in the delivered asset); competition keeps it at the relayer's true gas cost + margin. A too-low ceiling is a liveness issue (the VAA sits unredeemed), never a loss.
+### Path scope
 
-The OneClick quote takes its own spread on the NEAR side (reflected in the quote, not charged on-chain). Sizing target: `value(amountIn) ≳ xcmFee + maxRelayFee + oneClick.requiredDeposit`.
+`path` is **per DCA schedule**, not per tranche. All tranches of one schedule share
+one `A` and one `0xN`, so balances merge — which is what makes the drain loop
+idempotent (§5).
 
-## Key Design Decisions
+The order published for a path is a **standing authorization** — "any balance in `A`
+may be swapped to `destinationAsset` and delivered to `recipient`" — so it is
+published once and resubmitted for every deposit, whether that is one swap or
+twenty-two tranches. VAAs are permanent public data, so the bot hands the router the
+same one each time and the router re-verifies it — no stored state, no per-tranche
+message, no replay key. The balance bounds what an authorization can do.
+See `schema.md` §2 and §3.
 
-1. **One extrinsic, one message.** Swap + `batch_all` dispatch are atomic on Hydration; the WETH and the intent payload cross as a **single** Wormhole TokenBridge `transferTokensWithPayload`. No fast/slow split, no pool, no gating — the transfer carries its own value and is delivered on redemption.
-2. **Direct TokenBridge over a pooled fast-path for this direction.** Moonbeam finalizes in ~seconds, so fronting liquidity from a pre-funded landing pool to beat slow source finality buys nothing. WTT skips the pool entirely; BJP exists for source chains where finality is slow enough to justify it.
-3. **Any Hydration asset in, ETH out.** The user picks any asset the router can sell; the emitter buys the GLMR fee and swaps the rest to WETH. OneClick's `ETH → *` quote graph is the broadest origin, so the bridged/origin asset is always ETH.
-4. **WETH on Hydration/Moonbeam, native ETH at the deposit.** The receiver unwraps the delivered WETH to native ETH and forwards native ETH to the OneClick `depositAddress` (which expects `originAsset = ETH.eth`). Unwrap happens only when the delivered token equals the configured `wrappedNative`; anything else degrades to an ERC20 forward instead of bricking.
-5. **Permissionless, replay-safe redemption.** The payload — not the caller — dictates the destination. The TokenBridge restricts `completeTransferWithPayload` to the encoded recipient and marks the VAA consumed, so a malicious relayer can neither redirect funds nor double-spend. An optional `authorizedRelayer` allowlist grants a 5-minute exclusivity window per VAA, then opens to anyone (liveness fallback).
-6. **Caller-set slippage on both swap legs + a relay-fee ceiling.** `minEthOut` bounds the swap output; `maxFeeIn` bounds the asset spent buying the GLMR fee; `maxRelayFee` bounds the destination relay claim — so neither a thin route nor an over-charging relayer can silently extract value.
-7. **Self-policing relay market.** A single message both delivers to the recipient and pays its redeemer, so the fee can be fully permissionless: the relayer names `feeRequested ≤ maxRelayFee`, competition drives it toward true cost, and an unprofitable job simply goes unrelayed (funds safe). See [relay-fee.md](relay-fee.md).
-8. **`submitDepositTx` as the NEAR-side continuation.** `nintent` hands OneClick the quoted `depositAddress` and the actual Ethereum tx hash — the canonical signal to continue processing.
-9. **Intent ID as local correlation primitive.** Computed by the UI, threaded through `IntentEmitterWtt`, the TokenBridge payload, and the `BridgeInitiated` / `IntentForwarded` events. The deposit recipient is `depositAddress`, not `intentId`.
-10. **Reverts are recoverable, not lost.** A failed forward reverts the whole `redeem`, and the VAA is only marked consumed on success — so it stays redeemable for retry; the WETH remains locked on Moonbeam against the unredeemed VAA. MDA-stranding (if the remote Moonbeam leg fails) is recoverable by the owner via a Transact-as-MDA (today through a UUPS upgrade adding a recovery entrypoint).
-11. **No on-chain failure handling in V1.** Expired or rejected quotes are handled operationally; on-chain refund logic is deferred. See [refund.md](refund.md).
-12. **`sweep` as escape hatch.** Owner-only recovery of stray tokens or native ETH at the receiver.
+Per-tranche paths would also work — unlike pre-minted 1Click quotes these carry no
+rate and never expire — but they buy only bookkeeping, at the cost of storing N
+addresses instead of one.
 
-## How Contracts Map
+### Why nobody else's deployment can reach `A`
 
-| Contract / Component    | Role                                                                                                                                                                                                                                                                              |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IntentEmitter`         | **Abstract base** — on Hydration. Shared swap + GLMR-fee + XCM `batch_all` + dispatch. Variants override `_bridgeViaWormholeCall` (and `_encodePayload`).                                                                                                                          |
-| `IntentEmitterWtt`      | **New, deployed** — WTT variant. The MDA approves the Wormhole TokenBridge and calls `transferTokensWithPayload(WETH, ethOut, Ethereum, IntentReceiver, payload = (intentId, depositAddress, maxRelayFee))`. One message; no Basejump.                                            |
-| Wormhole TokenBridge    | Third-party transport (Moonbeam + Ethereum). `transferTokensWithPayload` locks WETH on Moonbeam and emits the payload-3 VAA; `completeTransferWithPayload` releases it to the receiver on Ethereum. (8-dec normalization — see relay-fee.md.)                                       |
-| `IntentReceiver`        | **New, deployed** — on Ethereum. `redeem(vaa, feeRequested)` completes the transfer, unwraps WETH → native ETH, pays the relayer (`≤ maxRelayFee`), and forwards the rest to the OneClick `depositAddress`. Holds no liquidity in the happy path; permissionless + replay-safe.    |
-| `mrelayer` agent        | **Off-chain** — VAA relayer. Polls for payload-3 transfers to `IntentReceiver`, sizes `feeRequested` via the `quoter`, calls `redeem`. Operator runs it as the liveness backstop; redemption is an open race.                                                                     |
-| `quoter` agent          | **Off-chain** — relay-fee quoter the relayer reads to size `feeRequested` against live gas.                                                                                                                                                                                       |
-| `nintent` agent         | **Off-chain** — headless keeper. Watches `IntentForwarded`, calls `submitDepositTx` as a latency optimization. No HTTP API, no registry. OneClick still completes swaps if `nintent` is offline.                                                                                  |
-| Defuse / OneClick API   | Third-party — returns quote data, quote-specific `depositAddress`, accepts `submitDepositTx`.                                                                                                                                                                                     |
-| `intents.near`          | Third-party — NEAR Intents settlement layer behind the quote flow.                                                                                                                                                                                                                |
-| `IntentEmitterBjp` / `IntentRouter` / Basejump landing | **Alternative (not deployed for intents)** — the BJP pooled variant. See [basejump/spec.md](../basejump/spec.md) and the BJP column in [relay-fee.md](relay-fee.md).                                                                                |
+Derivation is keyed on `(predecessor, path)`. Measured, with the path held constant:
+
+```
+intents-router.hydration.near + "dca-1" → A 1a0723b8… → 0x43F3DB49…
+attacker.near                 + "dca-1" → A 551d7b45… → 0x21B26d30…
+intents-router.hydration.near + "dca-1" → A 1a0723b8… → 0x43F3DB49…   (deterministic)
+```
+
+An attacker deploying byte-identical code to another account derives a different
+key, a different account, and a different deposit address. **Code identity is
+irrelevant to derivation; only account identity matters.** So forks of this router
+are harmless — they operate on a disjoint set of accounts.
+
+> **`predecessor` is an argument on the view method, but not on `sign`.** Anyone can
+> _compute_ anyone's derived public key — the table above computes `attacker.near`'s
+> — because `derived_public_key` is a public read. When the router calls `sign`,
+> however, the MPC network takes the predecessor from the runtime's true caller;
+> there is no field to lie in. Public derivability of the address and authority over
+> it are entirely separate.
+
+### Deploy to a sub-account
+
+Derivation binds to an account **id**. If that id could ever be re-registered by
+someone else, they would inherit every derived account in the system. Deploy to a
+sub-account of a name you control — `intents-router.hydration.near` — since only
+`hydration.near` can create sub-accounts beneath itself. A standalone top-level
+name leaves the id's future in the registrar's hands.
+
+### The invariant that carries the whole design
+
+Nothing external constrains how `A` is spent. `A` is a public key, not a contract
+— it has no policy and cannot refuse anyone, and `intents.near` honours _any_
+valid A-signature it is shown. There is no protocol rule saying "this account may
+only be spent via `finalize`."
+
+Two layers produce the guarantee, and only the first is cryptographic.
+
+**Layer 1 — who can sign for `A`.** MPC derivation is keyed on `(caller, path)`, so only
+`router.near` derives `K_A`; a call from any other account yields a different key for a different
+account. Cryptographic, and it stops everyone else.
+
+**Layer 2 — what the router signs.** The router's code only builds withdrawals whose `msg` came from
+a verified VAA. Code only — as strong as the code plus its immutability.
+
+Layer 2 is the router constraining _itself_, which yields a hard implementation
+rule:
+
+> **Every code path from a public method to `v1.signer.sign` MUST be gated on a
+> freshly verified VAA. No exceptions, no admin bypass, no debug helper, no
+> migration shim, no generic `sign(payload)`.**
+
+A single unguarded path to the signer hands an attacker every DCA account in the
+system simultaneously. Note this binds the escape hatch too (§ below): it needs a
+signature, so it must be VAA-gated rather than owner-gated — an owner-gated
+rescue method is precisely the unguarded path this rule forbids.
+
+Note also that nothing binds the **deposit** side. `0xN` is publicly derivable
+with no auth, so anyone may deposit to it and the funds land in `A`. That is
+harmless — the router can only ever move them to the VAA's recipient — but do not
+mistake deposit-side obscurity for a control.
+
+> **Deployment consequence.** MPC derivation binds to the router's **account id,
+> not its code hash**. Redeploying different code to that account gives the new
+> code control of the same funds. So an upgradeable router means the deploy key
+> is a redirect capability — exactly the property being designed out. Either
+> delete all full-access keys after deploy (immutable; design the refund path in
+> from day one) or put upgrades behind a timelock long enough for users to exit.
+> This is a required decision before mainnet, not an afterthought.
+
+---
+
+## 4. Components to build
+
+| #   | Component            | Chain         | Status                                                                                                                                                                    |
+| --- | -------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `IntentEmitter`      | Hydration EVM | **built** — `placeOrder`                                                                                                                                                  |
+| 2   | `IntentReceiver`     | Ethereum      | **built** — `processOrder`                                                                                                                                                |
+| 3   | `IntentQuoteEmitter` | Hydration EVM | **built** — `publishQuote`                                                                                                                                                |
+| 4   | Schedule storage     | Hydration     | to build — `0xN`, `maxRelayFee`, tranche params per schedule                                                                                                              |
+| 5   | `IntentRouter`       | NEAR (Rust)   | to build — VAA verification, floor enforcement, intent construction, MPC signing                                                                                          |
+| 6   | Relay bot            | off-chain     | to build — balance polling, solver quoting, `finalize`, `publish_intent`, status                                                                                          |
+
+Components 1–2 are shared with the 1Click variant and already carry it. 3–6 are what the MPC variant
+adds. The bot is the only stateful off-chain piece and is untrusted by construction.
+
+`IntentQuoteEmitter` is deployed separately from `IntentEmitter`, so its Wormhole emitter address is
+distinct. That address is what the NEAR router pins — see [schema.md](schema.md) §1.
+
+---
+
+## 5. Sequence, per tranche
+
+1. DCA pallet fires.
+2. Scheduler calls `placeOrder(assetIn, amountIn, minEthOut, 0xN, maxRelayFee)` — sells for WETH,
+   settles over NTT, publishes the forwarding instruction. See
+   [Shared transport](#shared-transport).
+3. The quote itself was published once by `publishQuote(Quote)`, not per tranche; its VAA is
+   permanent public data that the bot resubmits every time.
+4. On Ethereum, `IntentReceiver.processOrder` delivers the settlement and forwards native ETH to
+   `0xN`, net of the relay fee.
+5. POA credits intents account `A` with `nep141:eth.omft.near`.
+6. Bot observes `A`'s balance > 0. Takes a per-account lock (one in-flight intent
+   per account — trivial, since each DCA maps to one account).
+7. Bot calls `quote` on the solver relay with `min_deadline_ms: 120000`.
+8. Bot calls `IntentRouter.finalize(vaa, quote_hash, amount_out)`. The router reads
+   A's balance itself; only the solver's quoted output is supplied.
+9. Router verifies the VAA, checks replay, enforces the floor, builds the intent,
+   calls `v1.signer.sign(...)`.
+10. On callback, router assembles the `MultiPayload` and emits it as a log
+    (and stores it for view access).
+11. Bot reads the signed payload and calls `publish_intent(quote_hashes, signed_data)`.
+12. Bot polls `get_status` until `SETTLED`. Releases the lock.
+
+**Failure at any of 7–12 leaves the balance untouched in `A`.** The next poll
+retries from step 6. Two tranches landing before a swap are swapped together.
+An expired quote is discarded and re-quoted at no cost — no funds move on an
+expired quote. The balance _is_ the state; individual deposits are never tracked.
+
+### Timing
+
+Only steps 9–11 sit inside the quote's validity window — the bridge latency is
+entirely before step 7. MPC signing is seconds. `min_deadline_ms: 120000` is
+generous; do **not** request long windows, since a quote valid for `T` is an
+option the solver writes and its price scales with `√T` (a 60-minute window costs
+roughly 7–8× the time premium of a 60-second one, when solvers answer at all).
+
+---
+
+## 6. Known residual: price integrity
+
+The VAA fixes _destination_ integrity. It does not fix _price_ integrity.
+
+Hydration cannot compute a ZEC floor — it has no ZEC price — so `amount_out`
+originates from the bot's solver quote. A compromised bot cannot send funds
+elsewhere, but colluding with a solver it could accept a poor rate and extract
+value via the spread.
+
+Bounding options, in ascending strength:
+
+1. **Sanity bounds only.** Router rejects absurd values (zero, overflow) and
+   relies on solver competition plus alerting. Cheapest; documented residual.
+2. **Rate floor in the VAA.** Hydration carries `maxSlippageBps` and a reference
+   rate. Works for fixed-term DCAs; for a rolling DCA the reference goes stale,
+   which is the same failure that killed pre-minting.
+3. **On-chain price reference on NEAR.** Router checks `amount_out` against an
+   oracle. Strongest, but Ref Finance has no meaningful ZEC depth (161 pools
+   touch `zec.omft.near`, all but one at zero TVL), so this needs a real oracle
+   feed and is its own project.
+
+**Recommendation:** ship with (1) plus monitoring, and record the residual
+explicitly. Do not describe the system as trustless without qualifying it: it is
+redirect-proof, not price-proof.
+
+---
+
+## 7. Verification status
+
+What has been checked against a live system, and what is still an assumption, lives in
+[verification.md](verification.md) — grouped by status, blocking items first.
+
+Three are blocking and worth naming here: the exact bytes signed under `nep413` / `raw_ed25519`, that
+the router account id is registered and controlled by us, and that solvers quote ETH→ZEC at our
+tranche size at all. The last one can invalidate the whole design, so test it first.

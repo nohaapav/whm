@@ -4,17 +4,15 @@ pragma solidity ^0.8.22;
 library HydrationConsts {
     uint32 internal constant PARA_ID = 2034;
 
+    /// @notice Wormhole chain id — the id used in VAAs and NTT routes. Hydration has three distinct
+    ///         identifiers: this one (73), the EVM chain id (222222), and the para id (2034).
+    uint16 internal constant WORMHOLE_CHAIN_ID = 73;
+
     /// @notice Dispatch precompile (0x0401) — executes a SCALE-encoded runtime call as the caller.
     address internal constant DISPATCH_PRECOMPILE = 0x0000000000000000000000000000000000000401;
 
     // --- Native asset ids ---
     uint32 internal constant WETH_ID = 20;
-    uint32 internal constant GLMR_ID = 16;
-
-    /// @notice WETH: { parents:1, X3(Parachain(2004), PalletInstance(110), AccountKey20(0xab3f…)) }
-    bytes internal constant WETH_LOCATION = hex"010300511f046e0300ab3f0245b83feb11d15aaffefd7ad465a59817ed";
-    /// @notice GLMR: { parents:1, X2(Parachain(2004), PalletInstance(10)) }
-    bytes internal constant GLMR_LOCATION = hex"010200511f040a";
 
     /// @notice Asset id → ERC20-precompile address: 0x0100000000 | assetId.
     function toErc20(uint32 assetId) internal pure returns (address) {

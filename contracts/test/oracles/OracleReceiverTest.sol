@@ -140,4 +140,36 @@ contract OracleReceiverTest is Test, MockWormhole {
         );
         receiver.receiveMessage(_buildVaaWithHash(olderPayload, bytes32("salt")));
     }
+
+    /// @notice The envelope stamp comes from the source chain, whose block clock drifts either side
+    ///         of Hydration's. Leading it must read as fresh rather than underflow the age check.
+    function testAcceptsVaaStampedAheadOfLocalClock() public {
+        MockManagedOracle oracle = new MockManagedOracle();
+        bytes32 assetId = keccak256("PRIME");
+        receiver.setOracle(assetId, address(oracle));
+
+        vm.warp(1000);
+        vaaTimestampOverride = 1011; // source 11s ahead — measured between Ethereum and Hydration
+
+        bytes memory payload = abi.encode(uint8(1), assetId, uint256(2e18), uint64(1011));
+        receiver.receiveMessage(_buildVaa(payload));
+
+        (, uint64 storedTimestamp,) = receiver.latestPrices(assetId);
+        assertEq(storedTimestamp, 1011, "envelope stamp must be stored");
+        assertEq(oracle.callCount(), 1, "price must reach the oracle");
+    }
+
+    /// @notice Widening the age check forward must not loosen it backward.
+    function testStillRejectsPriceOlderThanMaxAge() public {
+        MockManagedOracle oracle = new MockManagedOracle();
+        bytes32 assetId = keccak256("PRIME");
+        receiver.setOracle(assetId, address(oracle));
+
+        vm.warp(2000);
+        vaaTimestampOverride = 1000; // 1000s old against the default 300s window
+
+        bytes memory payload = abi.encode(uint8(1), assetId, uint256(2e18), uint64(1000));
+        vm.expectRevert("Price too stale");
+        receiver.receiveMessage(_buildVaa(payload));
+    }
 }

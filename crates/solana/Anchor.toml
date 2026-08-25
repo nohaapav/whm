@@ -1,4 +1,7 @@
 [toolchain]
+# Must match anchor-lang in programs/*/Cargo.toml. Without it the CLI is whatever avm last
+# selected globally, and any project pinning another version (hydration-ntt pins 0.29.0) switches it.
+anchor_version = "0.32.1"
 package_manager = "pnpm"
 
 [features]

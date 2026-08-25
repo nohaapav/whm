@@ -1,12 +1,11 @@
 import { configs, spawnForks, teardownForks } from "./lib";
 
 /**
- * Spawn Hydration + Moonbeam chopsticks forks with an HRMP channel wired between
- * them, then idle until Ctrl-C. Useful for poking the forks via polkadot.js or
- * pointing a feature test at the printed ws endpoints.
+ * Spawn the Hydration chopsticks fork, then idle until Ctrl-C. Useful for poking the fork via
+ * polkadot.js or pointing a feature test at the printed ws endpoint.
  */
 async function main(): Promise<void> {
-  const nets = await spawnForks([configs.hydration, configs.moonbeam]);
+  const nets = await spawnForks([configs.hydration]);
 
   console.log("\n🥢 Forks ready:");
   for (const n of Object.values(nets)) {

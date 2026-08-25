@@ -1,9 +1,13 @@
 # quoter
 
-Stateless HTTP service that quotes the destination **relay fee** for the Hydration/Moonbeam → out
-WTT intent path. The UI uses it to size `maxRelayFee` before bridging; `mrelayer` uses it to pick the
-`feeRequested` for `IntentReceiver.redeem(vaa, feeRequested)`. It only prices — no keys, no VAAs, no
-submission. Background: [relay-fee.md](../../docs/intents/relay-fee.md).
+Stateless HTTP service that quotes the destination **relay fee** for the Hydration → Ethereum intent
+path. The UI uses it to size `maxRelayFee` before placing an order; `relayer` uses it to pick the
+`feeRequested` for `IntentReceiver.processOrder(nttVaa, instructionVaa, feeRequested)`. It only
+prices — no keys, no VAAs, no submission. Background: [relay-fee.md](../../docs/intents/relay-fee.md).
+
+Pricing is general: the cost is computed in the chain's native token and can be expressed in **any
+Hydration-tradeable asset**, so it answers "what is this gas worth in USDC/DOT/…" as readily as it
+sizes a relay fee. The intents path itself always settles native, since `IntentReceiver` pays in ETH.
 
 ## API
 
@@ -28,7 +32,7 @@ Extend to a new chain by implementing `ChainQuoter` ([src/chains/](src/chains/))
 | `HYDRATION_RPC`            | papi WS endpoint (TradeRouter price source)                               | Required |
 | `ETH_RPC`                  | Ethereum RPC (gas price)                                                  | Required |
 | `ETH_WRAPPED_NATIVE`       | WETH address (`feeAsset` == this or `native` ⇒ no FX)                     | Required |
-| `ETH_GAS_LIMIT`            | Default gas limit for the relay cost (overridable per request)            | `150000` |
+| `ETH_GAS_LIMIT`            | Default gas limit for the relay cost (overridable per request)            | `500000` |
 | `ETH_GAS_PRICING_ASSET_ID` | Hydration (Omnipool) asset id used to price ETH gas (`20`=WETH, `34`=ETH) | Required |
 
 > ERC20 → Hydration asset id is resolved from `@galacticcouncil/xc-cfg` route configs.

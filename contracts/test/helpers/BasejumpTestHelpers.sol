@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import {IBasejumpCore} from "../../src/basejump/interfaces/IBasejumpCore.sol";
+import {IBasejumpPayload} from "../../src/basejump/interfaces/IBasejumpPayload.sol";
 
 /// @notice Test helper library for Basejump integration tests
 /// @dev Provides utilities for VAA generation and common test operations
@@ -9,27 +9,27 @@ library BasejumpTestHelpers {
     /// @notice Build a fast-path VAA for Basejump transfers (empty data)
     function buildFastPathVAA(
         uint16 sourceChain,
-        address sourceBasejump,
+        address sourceEmitter,
         address sourceAsset,
         uint256 netAmount,
         bytes32 recipient,
         uint64 transferSequence
     ) internal pure returns (bytes memory) {
-        return buildFastPathVAA(sourceChain, sourceBasejump, sourceAsset, netAmount, recipient, transferSequence, "");
+        return buildFastPathVAA(sourceChain, sourceEmitter, sourceAsset, netAmount, recipient, transferSequence, "");
     }
 
-    /// @notice Build a fast-path VAA for Basejump transfers carrying opaque receiver data
+    /// @notice Build a fast-path VAA for Basejump transfers carrying opaque delivery data
     /// @dev VAA format: abi.encode(emitterChainId, emitterAddress, payload)
     function buildFastPathVAA(
         uint16 sourceChain,
-        address sourceBasejump,
+        address sourceEmitter,
         address sourceAsset,
         uint256 netAmount,
         bytes32 recipient,
         uint64 transferSequence,
         bytes memory data
     ) internal pure returns (bytes memory) {
-        IBasejumpCore.TransferPayload memory transfer = IBasejumpCore.TransferPayload({
+        IBasejumpPayload.TransferPayload memory transfer = IBasejumpPayload.TransferPayload({
             sourceAsset: sourceAsset,
             amount: netAmount,
             recipient: recipient,
@@ -40,7 +40,7 @@ library BasejumpTestHelpers {
         bytes memory payload = abi.encode(transfer);
         return abi.encode(
             sourceChain,
-            bytes32(uint256(uint160(sourceBasejump))),
+            bytes32(uint256(uint160(sourceEmitter))),
             payload
         );
     }

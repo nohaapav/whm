@@ -52,7 +52,7 @@ contract OracleReceiver is MessageReceiver {
         uint64 vaaTimestamp = uint64(vm.timestamp);
         uint64 latestTimestamp = latestPrices[assetId].timestamp;
         if (vaaTimestamp <= latestTimestamp) revert StalePriceUpdate(assetId, vaaTimestamp, latestTimestamp);
-        require(block.timestamp - vaaTimestamp <= maxPriceAge, "Price too stale");
+        require(vaaTimestamp + maxPriceAge >= block.timestamp, "Price too stale");
 
         address oracle = oracles[assetId];
         if (oracle == address(0)) revert OracleNotSet(assetId);

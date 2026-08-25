@@ -10,10 +10,10 @@ export interface AssetState {
   sentAt: number;
 }
 
-/** Maps asset ID (base58 pubkey) -> last sent state */
+/** Maps a feed's route-scoped key -> last sent state. */
 export type BroadcasterState = Record<string, AssetState>;
 
-/** Maps asset ID (base58 pubkey) -> threshold as a fraction (0.01 = 1%). */
+/** Maps asset id -> threshold as a fraction (0.01 = 1%). A threshold is per asset, not per route. */
 export type ThresholdMap = Record<string, number>;
 
 export function loadState(filePath: string): BroadcasterState {

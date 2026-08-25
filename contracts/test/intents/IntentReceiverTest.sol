@@ -4,371 +4,436 @@ pragma solidity ^0.8.22;
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-import {ITokenBridge} from "wormhole-solidity-sdk/interfaces/ITokenBridge.sol";
 import {IWormhole} from "wormhole-solidity-sdk/interfaces/IWormhole.sol";
+
+import {INttManager} from "../../src/ntt/interfaces/INttManager.sol";
+import {NttPayload} from "../../src/ntt/NttPayload.sol";
 
 import {IntentReceiver} from "../../src/intents/IntentReceiver.sol";
 import {IIntentReceiver} from "../../src/intents/interfaces/IIntentReceiver.sol";
-import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockWETH} from "../mocks/MockWETH.sol";
 
-/// @dev Inbound side of the Wormhole TokenBridge for redeem() tests. The "vaa" passed to redeem is
-///      ignored; the test pre-configures the transfer body and the token to release. On
-///      completeTransferWithPayload the mock transfers the configured token to the caller (the
-///      receiver), mirroring how the real bridge releases the redeemed amount.
-/// @dev Minimal Wormhole core mock — only parseVM is exercised (freshness guard + exclusive window).
-contract MockWormholeCore {
-    uint32 public ts;
-    bytes32 public vaaHash = keccak256("mock-vaa");
+/// @dev Parses a VAA as `abi.encode(emitterChainId, emitterAddress, timestamp, nonce, payload)` and
+///      treats it as valid unless marked otherwise. `nonce` only keeps otherwise-identical VAAs on
+///      distinct hashes, the way two real messages would be.
+contract MockWormhole {
+    mapping(bytes32 => bool) public invalid;
 
-    function setTimestamp(uint32 t) external {
-        ts = t;
+    function markInvalid(bytes memory vaa) external {
+        invalid[keccak256(vaa)] = true;
     }
 
-    function parseVM(bytes memory) external view returns (IWormhole.VM memory parsed) {
-        parsed.timestamp = ts;
-        parsed.hash = vaaHash;
+    function parseVM(bytes memory encodedVM) public pure returns (IWormhole.VM memory vm) {
+        (uint16 chainId, bytes32 emitter, uint32 timestamp,, bytes memory payload) =
+            abi.decode(encodedVM, (uint16, bytes32, uint32, uint64, bytes));
+
+        vm.emitterChainId = chainId;
+        vm.emitterAddress = emitter;
+        vm.timestamp = timestamp;
+        vm.payload = payload;
+        vm.hash = keccak256(encodedVM);
+    }
+
+    function parseAndVerifyVM(bytes memory encodedVM)
+        external
+        view
+        returns (IWormhole.VM memory vm, bool valid, string memory reason)
+    {
+        vm = parseVM(encodedVM);
+        valid = !invalid[keccak256(encodedVM)];
+        reason = valid ? "" : "invalid";
     }
 }
 
-contract MockInboundTokenBridge {
-    uint16 public immutable homeChainId;
-    address public releaseToken; // token transferred to the redeemer on completion
-    ITokenBridge.TransferWithPayload body;
+/// @dev Stands in for NTT's manager: a message is marked executed before the rate limiter runs, so
+///      "executed" alone never means the funds moved — a queued entry says they did not.
+contract MockNttManager {
+    mapping(bytes32 => bool) public isMessageExecuted;
+    mapping(bytes32 => INttManager.InboundQueuedTransfer) internal _queued;
 
-    MockWormholeCore public core;
-    bool public completed; // toggles isTransferCompleted → exercises the freshness guard
-
-    constructor(uint16 _homeChainId) {
-        homeChainId = _homeChainId;
-        core = new MockWormholeCore();
+    function markExecuted(bytes32 digest) external {
+        isMessageExecuted[digest] = true;
     }
 
-    function chainId() external view returns (uint16) {
-        return homeChainId;
+    function enqueue(bytes32 digest, uint64 txTimestamp) external {
+        _queued[digest].txTimestamp = txTimestamp;
     }
 
-    function wormhole() external view returns (IWormhole) {
-        return IWormhole(address(core));
-    }
-
-    function isTransferCompleted(bytes32) external view returns (bool) {
-        return completed;
-    }
-
-    function setCompleted(bool c) external {
-        completed = c;
-    }
-
-    /// @dev Home-chain canonical assets only in these tests; wrapped lookups aren't exercised.
-    function wrappedAsset(uint16, bytes32) external pure returns (address) {
-        return address(0);
-    }
-
-    function configure(address token, uint256 amount, uint16 tokenChain, bytes32 tokenAddress, bytes memory payload)
+    function getInboundQueuedTransfer(bytes32 digest)
         external
+        view
+        returns (INttManager.InboundQueuedTransfer memory)
     {
-        releaseToken = token;
-        body = ITokenBridge.TransferWithPayload({
-            payloadID: 3,
-            amount: amount,
-            tokenAddress: tokenAddress,
-            tokenChain: tokenChain,
-            to: bytes32(0),
-            toChain: homeChainId,
-            fromAddress: bytes32(0),
-            payload: payload
-        });
-    }
-
-    function completeTransferWithPayload(bytes memory) external returns (bytes memory) {
-        if (body.amount > 0) {
-            MockERC20(releaseToken).transfer(msg.sender, body.amount); // MockWETH shares this selector
-        }
-        return abi.encode(body);
-    }
-
-    function parseTransferWithPayload(bytes memory encoded)
-        external
-        pure
-        returns (ITokenBridge.TransferWithPayload memory)
-    {
-        return abi.decode(encoded, (ITokenBridge.TransferWithPayload));
+        return _queued[digest];
     }
 }
 
+/// @dev Stands in for NTT's transceiver: delivering a settlement credits the receiver with the ETH
+///      the manager would have released. Permissionless, exactly like the real one.
+contract MockTransceiver {
+    using NttPayload for bytes;
+
+    mapping(bytes32 => bool) public isVAAConsumed;
+
+    address public receiver;
+    uint256 public release;
+    MockNttManager public manager = new MockNttManager();
+
+    /// @dev Consume the VAA without the manager executing it — what a sub-threshold attestation
+    ///      looks like when more than one transceiver is enabled.
+    bool public skipExecute;
+
+    function configure(address _receiver, uint256 _release) external {
+        receiver = _receiver;
+        release = _release;
+    }
+
+    function setSkipExecute(bool value) external {
+        skipExecute = value;
+    }
+
+    function nttManager() external view returns (address) {
+        return address(manager);
+    }
+
+    /// @dev Hold a delivered settlement in the inbound rate-limit queue.
+    function enqueue(bytes memory encodedMessage) external {
+        manager.enqueue(_digest(encodedMessage), uint64(block.timestamp));
+    }
+
+    receive() external payable {}
+
+    function receiveMessage(bytes memory encodedMessage) external {
+        bytes32 hash = keccak256(encodedMessage);
+        require(!isVAAConsumed[hash], "consumed");
+        isVAAConsumed[hash] = true;
+
+        if (!skipExecute) manager.markExecuted(_digest(encodedMessage));
+
+        (bool ok,) = receiver.call{value: release}("");
+        require(ok, "release failed");
+    }
+
+    function _digest(bytes memory encodedMessage) internal pure returns (bytes32) {
+        (uint16 chainId,,,, bytes memory payload) =
+            abi.decode(encodedMessage, (uint16, bytes32, uint32, uint64, bytes));
+        return keccak256(abi.encodePacked(chainId, payload.managerMessage()));
+    }
+}
+
+/// @dev Rejects native ETH, to exercise the failed-forward path.
+contract RejectsEth {
+    receive() external payable {
+        revert("no");
+    }
+}
+
+/// @title IntentReceiverTest
+/// @notice Pins what carries the last hop:
+///
+///           1. the two VAAs must name the same sequence, so a caller cannot pay for any pending
+///              settlement and claim the fee of whichever instruction pays best;
+///           2. the destination and the amount come from signed messages, never from the caller;
+///           3. an instruction acts once, and a third party having delivered first is ordinary
+///              rather than a denial of service.
+///
+/// @dev Settlements are built with NTT's own encoders, so the fixtures and the contract's parser
+///      cannot drift apart.
 contract IntentReceiverTest is Test {
-    IntentReceiver public receiver;
-    MockInboundTokenBridge public bridge;
-    MockWETH public weth;
-    MockERC20 public token;
+    uint16 constant HYDRATION_CHAIN = 73;
+    uint16 constant ETHEREUM_CHAIN = 2;
+    uint256 constant AMOUNT = 1 ether;
+    uint256 constant MAX_RELAY_FEE = 0.01 ether;
+    uint64 constant SEQUENCE = 7;
 
-    uint16 constant HOME_CHAIN = 2; // Ethereum
-    address public relayer = makeAddr("relayer");
+    IntentReceiver public receiver;
+    MockWormhole public wormhole;
+    MockTransceiver public transceiver;
+
+    bytes32 public emitterAddress = bytes32(uint256(uint160(makeAddr("emitter"))));
     address public depositAddress = makeAddr("depositAddress");
-    address public stranger = makeAddr("stranger");
-    bytes32 public intentId = keccak256("intent-1");
+    address public relayer = makeAddr("relayer");
 
     function setUp() public {
-        bridge = new MockInboundTokenBridge(HOME_CHAIN);
-        weth = new MockWETH();
-        token = new MockERC20();
+        wormhole = new MockWormhole();
+        transceiver = new MockTransceiver();
 
-        IntentReceiver impl = new IntentReceiver();
-        ERC1967Proxy proxy = new ERC1967Proxy(
-            address(impl), abi.encodeCall(IntentReceiver.initialize, (address(bridge), address(weth)))
+        receiver = IntentReceiver(
+            payable(
+                address(
+                    new ERC1967Proxy(
+                        address(new IntentReceiver()),
+                        abi.encodeCall(
+                            IntentReceiver.initialize, (address(wormhole), address(transceiver))
+                        )
+                    )
+                )
+            )
         );
-        receiver = IntentReceiver(payable(address(proxy)));
+        receiver.setEmitter(emitterAddress);
+
+        transceiver.configure(address(receiver), AMOUNT);
+        vm.deal(address(transceiver), 100 ether);
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────
+    // ─── Helpers ────────────────────────────────────────────────────
 
-    function _payload(bytes32 id, address dest, uint256 maxRelayFee) internal pure returns (bytes memory) {
-        return abi.encode(id, dest, maxRelayFee);
+    function _vaa(uint16 chainId, bytes32 emitter, uint64 nonce, bytes memory payload)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encode(chainId, emitter, uint32(block.timestamp), nonce, payload);
     }
 
-    /// @dev Seed a WETH delivery: bridge holds `amount` WETH and is set to release it as the home-chain
-    ///      canonical token equal to `weth` (→ unwrap-to-native path in the receiver).
-    function _configureWeth(uint256 amount, uint256 maxRelayFee) internal {
-        weth.mintTo{value: amount}(address(bridge));
-        bridge.configure(
-            address(weth),
-            amount,
-            HOME_CHAIN,
-            bytes32(uint256(uint160(address(weth)))),
-            _payload(intentId, depositAddress, maxRelayFee)
+    function _instruction(uint64 sequence, uint256 amount, uint256 maxRelayFee)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _vaa(
+            HYDRATION_CHAIN,
+            emitterAddress,
+            sequence,
+            abi.encode(sequence, depositAddress, amount, maxRelayFee)
         );
     }
 
-    // ─── Deployment ──────────────────────────────────────────────
-
-    function testDeployment() public view {
-        assertEq(receiver.owner(), address(this));
-        assertEq(address(receiver.tokenBridge()), address(bridge));
-        assertEq(receiver.wrappedNative(), address(weth));
-    }
-
-    // ─── redeem: native path ─────────────────────────────────────
-
-    function testRedeemForwardsNetAndPaysRelayerNative() public {
-        uint256 amount = 10 ether;
-        uint256 maxRelayFee = 1 ether;
-        uint256 fee = 0.3 ether;
-        _configureWeth(amount, maxRelayFee);
-
-        vm.expectEmit(true, true, true, true);
-        emit IIntentReceiver.IntentForwarded(intentId, receiver.NATIVE(), depositAddress, amount - fee);
-        vm.expectEmit(true, true, false, true);
-        emit IIntentReceiver.RelayFeePaid(intentId, relayer, fee);
-
-        vm.prank(relayer);
-        receiver.redeem("", fee);
-
-        assertEq(depositAddress.balance, amount - fee, "deposit gets net");
-        assertEq(relayer.balance, fee, "relayer reimbursed");
-        assertEq(address(receiver).balance, 0, "receiver holds nothing");
-    }
-
-    function testRedeemZeroFeeForwardsFull() public {
-        uint256 amount = 5 ether;
-        _configureWeth(amount, 1 ether);
-
-        // No RelayFeePaid expected; assert the forward.
-        vm.expectEmit(true, true, true, true);
-        emit IIntentReceiver.IntentForwarded(intentId, receiver.NATIVE(), depositAddress, amount);
-
-        vm.prank(relayer);
-        receiver.redeem("", 0);
-
-        assertEq(depositAddress.balance, amount);
-        assertEq(relayer.balance, 0);
-    }
-
-    function testRedeemFeeAtCeilingBoundary() public {
-        uint256 amount = 4 ether;
-        uint256 maxRelayFee = 1 ether;
-        _configureWeth(amount, maxRelayFee);
-
-        vm.prank(relayer);
-        receiver.redeem("", maxRelayFee); // fee == ceiling is allowed
-
-        assertEq(relayer.balance, maxRelayFee);
-        assertEq(depositAddress.balance, amount - maxRelayFee);
-    }
-
-    // ─── redeem: ERC20 (degraded) path ───────────────────────────
-
-    function testRedeemErc20PaysFeeInKind() public {
-        uint256 amount = 1_000e6;
-        uint256 fee = 50e6;
-        token.mint(address(bridge), amount);
-        bridge.configure(
-            address(token),
-            amount,
-            HOME_CHAIN,
-            bytes32(uint256(uint160(address(token)))), // != wrappedNative → ERC20 forward
-            _payload(intentId, depositAddress, 100e6)
+    /// @dev A settlement in the transceiver's wire format:
+    ///      prefix ‖ sourceManager ‖ recipientManager ‖ len ‖ (id ‖ sender ‖ len ‖ transfer) ‖ len.
+    function _settlementWithPrefix(bytes4 prefix, uint64 sequence)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes memory payload = abi.encodePacked(
+            prefix,
+            bytes32(uint256(1)), // sourceNttManagerAddress
+            bytes32(uint256(2)), // recipientNttManagerAddress
+            uint16(66), // nttManagerPayload length
+            bytes32(uint256(sequence)), // id
+            bytes32(uint256(3)), // sender
+            uint16(0), // transfer payload length
+            uint16(0) // transceiverPayload length
         );
-
-        vm.expectEmit(true, true, true, true);
-        emit IIntentReceiver.IntentForwarded(intentId, address(token), depositAddress, amount - fee);
-
-        vm.prank(relayer);
-        receiver.redeem("", fee);
-
-        assertEq(token.balanceOf(depositAddress), amount - fee);
-        assertEq(token.balanceOf(relayer), fee);
-        assertEq(token.balanceOf(address(receiver)), 0);
+        return _vaa(HYDRATION_CHAIN, bytes32(uint256(9)), sequence, payload);
     }
 
-    // ─── redeem: reverts ─────────────────────────────────────────
+    function _settlement(uint64 sequence) internal view returns (bytes memory) {
+        return _settlementWithPrefix(NttPayload.WH_TRANSCEIVER_PAYLOAD_PREFIX, sequence);
+    }
 
-    function testRedeemRevertsWhenFeeExceedsCeiling() public {
-        _configureWeth(10 ether, 1 ether);
+    function _redeem(uint64 sequence, uint256 feeRequested) internal {
+        receiver.processOrder(
+            _settlement(sequence), _instruction(sequence, AMOUNT, MAX_RELAY_FEE), feeRequested
+        );
+    }
 
+    // ─── Redeem ─────────────────────────────────────────────────────
+
+    function testDeliversAndForwards() public {
+        vm.prank(relayer);
+        _redeem(SEQUENCE, 0);
+
+        assertEq(depositAddress.balance, AMOUNT, "whole amount must be forwarded");
+        assertEq(address(receiver).balance, 0, "nothing should be left over");
+    }
+
+    function testRelayFeeIsPaidToTheCaller() public {
+        vm.prank(relayer);
+        _redeem(SEQUENCE, MAX_RELAY_FEE);
+
+        assertEq(relayer.balance, MAX_RELAY_FEE, "caller must be reimbursed");
+        assertEq(depositAddress.balance, AMOUNT - MAX_RELAY_FEE, "rest must be forwarded");
+    }
+
+    /// @notice The ceiling is committed at source, so a caller cannot price its own claim.
+    function testFeeAboveTheCeilingReverts() public {
         vm.prank(relayer);
         vm.expectRevert(IIntentReceiver.FeeExceedsCeiling.selector);
-        receiver.redeem("", 1 ether + 1);
+        _redeem(SEQUENCE, MAX_RELAY_FEE + 1);
     }
 
-    function testRedeemRevertsOnMalformedPayloadLength() public {
-        // 64-byte payload (old format) → rejected.
-        weth.mintTo{value: 1 ether}(address(bridge));
-        bridge.configure(
-            address(weth),
-            1 ether,
-            HOME_CHAIN,
-            bytes32(uint256(uint160(address(weth)))),
-            abi.encode(intentId, depositAddress)
+    /// @notice The check the whole two-VAA design rests on: pay for one settlement, claim another's
+    ///         instruction, and the fee follows the richest ceiling rather than the work done.
+    function testMismatchedSequenceReverts() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IIntentReceiver.SequenceMismatch.selector, SEQUENCE + 1, SEQUENCE)
+        );
+        receiver.processOrder(
+            _settlement(SEQUENCE), _instruction(SEQUENCE + 1, AMOUNT, MAX_RELAY_FEE), MAX_RELAY_FEE
+        );
+    }
+
+    /// @notice NTT's delivery is permissionless, so someone else getting there first is ordinary.
+    /// @notice A settlement NTT delivered but held in the inbound rate-limit queue has released
+    ///         nothing, so its instruction must not be paid out of another order's ETH.
+    function testQueuedSettlementIsNotPaidFromAnotherOrder() public {
+        // Another order's settlement is already sitting here.
+        vm.deal(address(receiver), AMOUNT);
+
+        // A generic relayer delivered ours, but the limiter queued it — nothing was released.
+        bytes memory settlement = _settlement(SEQUENCE);
+        transceiver.configure(address(receiver), 0);
+        transceiver.receiveMessage(settlement);
+        transceiver.enqueue(settlement);
+
+        vm.prank(relayer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IIntentReceiver.SettlementNotReleased.selector, SEQUENCE)
+        );
+        receiver.processOrder(
+            settlement, _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE), MAX_RELAY_FEE
         );
 
-        vm.prank(relayer);
-        vm.expectRevert(IIntentReceiver.MalformedPayload.selector);
-        receiver.redeem("", 0);
+        assertEq(address(receiver).balance, AMOUNT, "the other order's ETH must be untouched");
     }
 
-    function testRedeemRevertsOnZeroDepositAddress() public {
-        _configureWeth(1 ether, 0);
-        bridge.configure(
-            address(weth),
-            1 ether,
-            HOME_CHAIN,
-            bytes32(uint256(uint160(address(weth)))),
-            _payload(intentId, address(0), 0)
+    /// @notice A VAA the transceiver consumed but the manager never executed — a sub-threshold
+    ///         attestation — is not a delivery either.
+    function testUnexecutedSettlementIsNotPaid() public {
+        vm.deal(address(receiver), AMOUNT);
+
+        bytes memory settlement = _settlement(SEQUENCE);
+        transceiver.configure(address(receiver), 0);
+        transceiver.setSkipExecute(true);
+        transceiver.receiveMessage(settlement);
+
+        vm.prank(relayer);
+        vm.expectRevert(
+            abi.encodeWithSelector(IIntentReceiver.SettlementNotReleased.selector, SEQUENCE)
+        );
+        receiver.processOrder(
+            settlement, _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE), MAX_RELAY_FEE
         );
 
-        vm.prank(relayer);
-        vm.expectRevert(IIntentReceiver.MalformedPayload.selector);
-        receiver.redeem("", 0);
+        assertEq(address(receiver).balance, AMOUNT, "the other order's ETH must be untouched");
     }
 
-    function testRedeemRevertsWhenNothingDelivered() public {
-        bridge.configure(
-            address(weth), 0, HOME_CHAIN, bytes32(uint256(uint160(address(weth)))), _payload(intentId, depositAddress, 0)
-        );
+    function testStillForwardsWhenAlreadyDelivered() public {
+        transceiver.receiveMessage(_settlement(SEQUENCE));
 
         vm.prank(relayer);
-        vm.expectRevert(IIntentReceiver.NothingDelivered.selector);
-        receiver.redeem("", 0);
+        _redeem(SEQUENCE, MAX_RELAY_FEE);
+
+        assertEq(depositAddress.balance, AMOUNT - MAX_RELAY_FEE, "must still forward");
+        assertEq(relayer.balance, MAX_RELAY_FEE, "caller did the op, caller is paid");
     }
 
-    // ─── redeem: freshness guard ─────────────────────────────────
+    /// @notice The amount is the instruction's, not the balance — a receiver holding an unrelated
+    ///         settlement or stray ETH must not have it swept into this forward.
+    function testAmountComesFromTheInstruction() public {
+        uint256 odd = 3.14159265 ether;
+        transceiver.configure(address(receiver), odd);
+        vm.deal(address(receiver), 5 ether);
 
-    function testRedeemRevertsWhenAlreadyRedeemed() public {
-        _configureWeth(10 ether, 1 ether);
-        bridge.setCompleted(true); // VAA already consumed (lost race)
+        receiver.processOrder(_settlement(SEQUENCE), _instruction(SEQUENCE, odd, MAX_RELAY_FEE), 0);
 
-        vm.prank(relayer);
+        assertEq(depositAddress.balance, odd, "forwarded amount must be the instructed one");
+        assertEq(address(receiver).balance, 5 ether, "the rest must be untouched");
+    }
+
+    function testInstructionCannotBeActedOnTwice() public {
+        _redeem(SEQUENCE, 0);
+
         vm.expectRevert(IIntentReceiver.AlreadyRedeemed.selector);
-        receiver.redeem("", 0.1 ether);
+        _redeem(SEQUENCE, 0);
     }
 
-    // ─── redeem: allowlist gating ────────────────────────────────
+    /// @notice A delivery that credits less than the settlement promised must not half-pay.
+    function testUnderfundedForwardReverts() public {
+        transceiver.configure(address(receiver), AMOUNT / 2);
 
-    function testRedeemPermissionlessWhenAllowlistEmpty() public {
-        // No authorized relayer → anyone earns the fee (default behavior).
-        uint256 amount = 10 ether;
-        uint256 fee = 0.4 ether;
-        _configureWeth(amount, 1 ether);
-
-        vm.prank(stranger);
-        receiver.redeem("", fee);
-
-        assertEq(stranger.balance, fee, "anyone earns fee while allowlist empty");
-        assertEq(depositAddress.balance, amount - fee);
+        vm.expectRevert(
+            abi.encodeWithSelector(IIntentReceiver.NotFunded.selector, AMOUNT, AMOUNT / 2)
+        );
+        _redeem(SEQUENCE, 0);
     }
 
-    function testRedeemGatedAuthorizedEarnsInWindow() public {
-        receiver.setAuthorizedRelayer(relayer, true);
-        bridge.core().setTimestamp(uint32(block.timestamp)); // issued now → inside exclusive window
-        uint256 amount = 10 ether;
-        uint256 fee = 0.3 ether;
-        _configureWeth(amount, 1 ether);
+    /// @notice Both halves of the pin are mandatory — a chain check alone honours any contract on
+    ///         Hydration, an address check alone the same address on any chain.
+    function testForeignEmitterRejected() public {
+        bytes32 attacker = bytes32(uint256(uint160(makeAddr("attacker"))));
+        bytes memory payload = abi.encode(SEQUENCE, depositAddress, AMOUNT, MAX_RELAY_FEE);
 
-        vm.prank(relayer);
-        receiver.redeem("", fee);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IIntentReceiver.UnauthorizedEmitter.selector, HYDRATION_CHAIN, attacker
+            )
+        );
+        receiver.processOrder(_settlement(SEQUENCE), _vaa(HYDRATION_CHAIN, attacker, SEQUENCE, payload), 0);
 
-        assertEq(relayer.balance, fee, "authorized relayer earns in window");
-        assertEq(depositAddress.balance, amount - fee);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IIntentReceiver.UnauthorizedEmitter.selector, ETHEREUM_CHAIN, emitterAddress
+            )
+        );
+        receiver.processOrder(_settlement(SEQUENCE), _vaa(ETHEREUM_CHAIN, emitterAddress, SEQUENCE, payload), 0);
     }
 
-    function testRedeemUnauthorizedRevertsInWindow() public {
-        receiver.setAuthorizedRelayer(relayer, true);
-        bridge.core().setTimestamp(uint32(block.timestamp)); // inside the exclusive window
-        _configureWeth(10 ether, 1 ether);
+    function testUnverifiedInstructionRejected() public {
+        bytes memory instruction = _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE);
+        wormhole.markInvalid(instruction);
 
-        vm.prank(stranger);
-        vm.expectRevert(IIntentReceiver.Unauthorized.selector);
-        receiver.redeem("", 0.3 ether);
+        vm.expectRevert(IIntentReceiver.InvalidInstruction.selector);
+        receiver.processOrder(_settlement(SEQUENCE), instruction, 0);
     }
 
-    function testRedeemUnauthorizedAllowedAfterWindow() public {
-        receiver.setAuthorizedRelayer(relayer, true);
-        bridge.core().setTimestamp(uint32(block.timestamp));
-        vm.warp(block.timestamp + 5 minutes); // window elapsed → public fallback
-        uint256 amount = 10 ether;
-        uint256 fee = 0.3 ether;
-        _configureWeth(amount, 1 ether);
+    function testZeroDepositAddressReverts() public {
+        bytes memory zeroDeposit = _vaa(
+            HYDRATION_CHAIN,
+            emitterAddress,
+            SEQUENCE,
+            abi.encode(SEQUENCE, address(0), AMOUNT, MAX_RELAY_FEE)
+        );
 
-        vm.prank(stranger);
-        receiver.redeem("", fee);
-
-        assertEq(stranger.balance, fee, "anyone earns after the exclusive window");
-        assertEq(depositAddress.balance, amount - fee);
+        vm.expectRevert(IIntentReceiver.MalformedInstruction.selector);
+        receiver.processOrder(_settlement(SEQUENCE), zeroDeposit, 0);
     }
 
-    function testSetAuthorizedRelayerCountAndGuards() public {
-        assertEq(receiver.authorizedRelayerCount(), 0);
+    /// @notice A failed forward unwinds the whole call, so both legs stay retryable.
+    function testForwardFailureUnwindsTheRedeem() public {
+        depositAddress = address(new RejectsEth());
 
-        receiver.setAuthorizedRelayer(relayer, true);
-        assertEq(receiver.authorizedRelayerCount(), 1);
-        assertTrue(receiver.authorizedRelayer(relayer));
+        vm.expectRevert(IIntentReceiver.NativeTransferFailed.selector);
+        _redeem(SEQUENCE, 0);
 
-        receiver.setAuthorizedRelayer(relayer, true); // idempotent — no double count
-        assertEq(receiver.authorizedRelayerCount(), 1);
+        assertFalse(
+            receiver.processed(keccak256(_instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE))),
+            "instruction must stay executable"
+        );
+        assertFalse(
+            transceiver.isVAAConsumed(keccak256(_settlement(SEQUENCE))),
+            "settlement must stay deliverable"
+        );
+    }
 
-        receiver.setAuthorizedRelayer(relayer, false);
-        assertEq(receiver.authorizedRelayerCount(), 0);
-        assertFalse(receiver.authorizedRelayer(relayer));
+    function testUnconfiguredEmitterReverts() public {
+        vm.prank(receiver.owner());
+        receiver.setEmitter(bytes32(0));
 
-        vm.prank(stranger);
+        vm.expectRevert(IIntentReceiver.NotConfigured.selector);
+        _redeem(SEQUENCE, 0);
+    }
+
+    // ─── Admin ──────────────────────────────────────────────────────
+
+    function testSweepRecoversStrayEth() public {
+        vm.deal(address(receiver), 1 ether);
+        address to = makeAddr("to");
+
+        receiver.sweep(to, 1 ether);
+        assertEq(to.balance, 1 ether, "sweep must move native");
+    }
+
+    function testOnlyOwnerAdmin() public {
+        address attacker = makeAddr("attacker");
+
+        vm.startPrank(attacker);
         vm.expectRevert(IIntentReceiver.NotOwner.selector);
-        receiver.setAuthorizedRelayer(stranger, true);
-    }
+        receiver.setEmitter(bytes32(uint256(1)));
 
-    // ─── Admin ───────────────────────────────────────────────────
-
-    function testSetWrappedNative() public {
-        address newWeth = makeAddr("newWeth");
-        vm.expectEmit(true, true, false, false);
-        emit IIntentReceiver.WrappedNativeUpdated(address(weth), newWeth);
-        receiver.setWrappedNative(newWeth);
-        assertEq(receiver.wrappedNative(), newWeth);
-    }
-
-    function testSetWrappedNativeRevertsUnauthorized() public {
-        vm.prank(stranger);
         vm.expectRevert(IIntentReceiver.NotOwner.selector);
-        receiver.setWrappedNative(makeAddr("x"));
+        receiver.sweep(attacker, 0);
+        vm.stopPrank();
     }
 }

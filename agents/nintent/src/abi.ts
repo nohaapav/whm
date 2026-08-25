@@ -1,7 +1,9 @@
 import { parseAbiItem } from "viem";
 
-// IIntentReceiver.IntentForwarded — emitted when redeem unwraps the bridged WETH to native ETH and
-// forwards it to a OneClick deposit address (intentId, asset, depositAddress are indexed).
-export const IntentForwardedEvt = parseAbiItem(
-  "event IntentForwarded(bytes32 indexed intentId, address indexed asset, address indexed depositAddress, uint256 amount)",
+// IIntentReceiver.OrderProcessed — emitted when processOrder delivers the NTT settlement and
+// forwards the native ETH to a deposit address (transferSequence, depositAddress are indexed).
+// `transferSequence` is the NTT manager's sequence, the key the settlement and its forwarding
+// instruction share; it is not a Wormhole sequence.
+export const OrderProcessedEvt = parseAbiItem(
+  "event OrderProcessed(uint64 indexed transferSequence, address indexed depositAddress, uint256 amount)",
 );

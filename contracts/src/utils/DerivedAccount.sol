@@ -21,7 +21,7 @@ library DerivedAccount {
     bytes4 constant EVM_ACCOUNT_PREFIX = 0x45544800;
 
     /// @notice Derive H160 for a sibling parachain sender (parents=1, parachainId defined)
-    /// @param parachainId Source parachain ID (e.g. 2004 for Moonbeam)
+    /// @param parachainId Source parachain ID
     /// @param account     Source Ethereum address on the origin chain
     function deriveSibling(uint32 parachainId, address account) internal view returns (address) {
         return deriveMultilocationAccountKey20(PARENTS_SIBLING, parachainId, true, account);

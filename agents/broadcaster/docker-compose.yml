@@ -1,18 +1,15 @@
 version: "3.3"
 services:
-  broadcaster:
+  # One image, one service per app. The command names the entry point — nothing is selected at
+  # runtime, and each app keeps its own state file under the shared volume.
+  app-oracle-solana:
     image: galacticcouncil/broadcaster:latest
+    command: [node, oracle-solana/app.js]
     environment:
-      - RPC_URL=
-      - PRIVATE_KEY=
+      - PRIVKEY= # base58 secret key
+      - RPC_SOLANA=
       - REFRESH_INTERVAL=
       - CHANGE_THRESHOLD=
-      - ETH_RPC_URL=
-      - ETH_PRIVATE_KEY=
-      - ETH_EMITTER=
-      - ETH_CHAIN_ID=
-      - ETH_EMITTER_BLOCK=
-      - ETH_SYMBOLS=
     volumes:
       - db:/app/.db
     configs:
@@ -25,6 +22,28 @@ services:
     deploy:
       labels:
         swarmpit.service.deployment.autoredeploy: "true"
+
+  app-oracle-ethereum:
+    image: galacticcouncil/broadcaster:latest
+    command: [node, oracle-ethereum/app.js]
+    environment:
+      - PRIVKEY= # 0x-prefixed hex key
+      - RPC_ETHEREUM=
+      - REFRESH_INTERVAL=
+      - CHANGE_THRESHOLD=
+    volumes:
+      - db:/app/.db
+    configs:
+      - source: thresholds
+        target: /app/thresholds.json
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: "true"
+
 networks:
   default:
     driver: overlay

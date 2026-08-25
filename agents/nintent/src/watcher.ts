@@ -1,7 +1,7 @@
 import { type Address, type PublicClient } from "viem";
 
 import log from "./logger";
-import { IntentForwardedEvt } from "./abi";
+import { OrderProcessedEvt } from "./abi";
 import { submitDeposit } from "./oneclick";
 
 export interface IntentWatcherCfg {
@@ -10,7 +10,7 @@ export interface IntentWatcherCfg {
 }
 
 /**
- * Watches `IntentReceiver.IntentForwarded` over a WebSocket transport (viem `eth_subscribe`, no
+ * Watches `IntentReceiver.OrderProcessed` over a WebSocket transport (viem `eth_subscribe`, no
  * polling) and pings 1Click for each forward so the deposit is detected immediately. viem reconnects
  * and re-subscribes on drop; submissions are deduped by (txHash, depositAddress) against redelivery.
  */
@@ -38,13 +38,16 @@ export class IntentWatcher {
   start(): void {
     this.unwatch = this.client.watchContractEvent({
       address: this.cfg.receiver,
-      abi: [IntentForwardedEvt],
-      eventName: "IntentForwarded",
+      abi: [OrderProcessedEvt],
+      eventName: "OrderProcessed",
       onLogs: (logs) => {
         for (const l of logs) {
-          const depositAddress = (l.args as { depositAddress?: Address }).depositAddress;
+          const { depositAddress, transferSequence } = l.args as {
+            depositAddress?: Address;
+            transferSequence?: bigint;
+          };
           if (depositAddress && l.transactionHash) {
-            void this.notify(depositAddress, l.transactionHash);
+            void this.notify(depositAddress, l.transactionHash, transferSequence);
           }
         }
       },
@@ -53,7 +56,7 @@ export class IntentWatcher {
       onError: (e) => log.warn(`[${this.cfg.name}] watch: ${e.message || e}`),
     });
     this.heartbeat = setInterval(() => void this.probe(), HEARTBEAT_MS);
-    log.info(`[${this.cfg.name}] watching IntentForwarded @ ${this.cfg.receiver}`);
+    log.info(`[${this.cfg.name}] watching OrderProcessed @ ${this.cfg.receiver}`);
   }
 
   stop(): void {
@@ -82,13 +85,17 @@ export class IntentWatcher {
    *
    * @param depositAddress OneClick deposit address from the event.
    * @param txHash         Forwarding tx hash.
+   * @param sequence       NTT manager sequence, logged so a deposit can be traced back to the
+   *                       settlement and the emitter's instruction. Not part of the dedupe key —
+   *                       the receiver consumes each instruction once, so one forward is one tx.
    * @returns The 1Click status, or null when skipped (duplicate) or the call failed.
    */
-  async notify(depositAddress: string, txHash: string): Promise<string | null> {
+  async notify(depositAddress: string, txHash: string, sequence?: bigint): Promise<string | null> {
     const key = `${txHash}:${depositAddress}`.toLowerCase();
     if (this.seen.has(key)) return null;
     this.seen.add(key);
-    log.info(`[${this.cfg.name}] IntentForwarded -> ${depositAddress} (tx ${txHash})`);
+    const seq = sequence === undefined ? "?" : sequence.toString();
+    log.info(`[${this.cfg.name}] OrderProcessed seq=${seq} -> ${depositAddress} (tx ${txHash})`);
     try {
       const r = await submitDeposit(depositAddress, txHash);
       log.info(`[${this.cfg.name}] submitDepositTx ${depositAddress} -> ${r.status}`);

@@ -1,6 +1,6 @@
 # WHM (Wormhole Messaging)
 
-Cross-chain infrastructure connecting EVM chains, Solana, and Hydration via Moonbeam. Handles oracle price relay, instant token bridging, and intent-driven swaps — through upgradeable contracts, an Anchor program, and off-chain agents.
+Cross-chain infrastructure connecting EVM chains, Solana, Sui and Hydration via Wormhole. Handles oracle price relay, instant token bridging, and intent-driven swaps — through upgradeable contracts, an Anchor program, and off-chain agents.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -21,8 +21,8 @@ Cross-chain infrastructure connecting EVM chains, Solana, and Hydration via Moon
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
 │  │                          agents/  (off-chain)                              │ │
 │  │   broadcaster — Solana → Wormhole price/rate publisher                     │ │
-│  │   bjscan      — Basejump indexer                                           │ │
-│  │   mrelayer    — Wormhole relayer-engine (legacy, not a pnpm member)        │ │
+│  │   scan        — Basejump + Intents indexer                                 │ │
+│  │   relayer     — Wormhole VAA relayer (hydration-ntt, intent)               │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -31,14 +31,13 @@ Cross-chain infrastructure connecting EVM chains, Solana, and Hydration via Moon
 
 ### Oracle Relay
 
-Solana program reads Kamino Scope oracle prices + SPL stake pool rates and broadcasts them through Wormhole to a Moonbeam dispatcher, which forwards price updates to Hydration's on-chain oracle via XCM. Ethereum-source variant uses an EVM `OracleEmitter` reading wstETH / apyUSD rates directly.
+Solana program reads Kamino Scope oracle prices + SPL stake pool rates and broadcasts them through Wormhole to a Hydration receiver, which forwards price updates to Hydration's on-chain oracle. Ethereum-source variant uses an EVM `OracleEmitter` reading wstETH / apyUSD rates directly.
 
 - [Spec](docs/oracle/spec.md)
-- [Schema](docs/oracle/schema.md)
 
 ### Basejump
 
-Instant cross-chain token bridging between EVM source chains and Hydration via Moonbeam. Fast-path settles in ~2 min against a pre-funded landing pool; slow Wormhole Token Bridge transfer replenishes the pool in the background (~13 min).
+Instant cross-chain token bridging from EVM source chains to Hydration. A fast-path message pays the user in ~2 min out of a pre-funded landing pool; a slow Wormhole NTT settlement replenishes the pool in the background (~13 min).
 
 - [Spec](docs/basejump/spec.md)
 - [Schema](docs/basejump/schema.md)
@@ -46,7 +45,7 @@ Instant cross-chain token bridging between EVM source chains and Hydration via M
 
 ### Intents
 
-Hydration users buy any NEAR-Intents supported asset (BTC, ZEC, NEAR,…) via OneClick quotes. A single Hydration extrinsic swaps the user's chosen asset to WETH and bridges it via Moonbeam + Wormhole; `IntentRouter` forwards native ETH into the quote's `depositAddress` on Ethereum, atomically with the fast-path delivery.
+Hydration users buy any NEAR-Intents supported asset (BTC, ZEC, NEAR,…) via OneClick quotes. A single Hydration extrinsic swaps the user's chosen asset to WETH and bridges it via Wormhole; `IntentReceiver` forwards native ETH into the quote's `depositAddress` on Ethereum, atomically with the fast-path delivery.
 
 - [Spec](docs/intents/spec.md)
 - [Schema](docs/intents/schema.md)
@@ -69,7 +68,7 @@ contracts/      # Foundry (Solidity) — @whm/contracts
 crates/         # Anchor / Cargo workspaces — @whm/crates-solana (extensible)
 migrations/     # Cross-platform deploy pipelines
 deployments/    # Migration state files (prod/, fork/)
-agents/         # Off-chain services (broadcaster, bjscan, mrelayer)
+agents/         # Off-chain services (broadcaster, scan, relayer, quoter, nintent)
 common/         # @whm/common — shared TS (evm, args, migration)
 sh/             # Cross-cutting bash wrappers (fork-*, migrate-*, verify-*)
 docs/           # Cross-cutting protocol docs
@@ -80,7 +79,6 @@ docs/           # Cross-cutting protocol docs
 ```bash
 # Local forks
 pnpm fork:base          # anvil :8546
-pnpm fork:moonbeam      # anvil :8545
 pnpm fork:hydration     # anvil :8547
 pnpm fork:ethereum      # anvil :8550
 pnpm fork:solana        # solana-test-validator :8898 (Wormhole + Oracle clone)
@@ -102,12 +100,13 @@ See [migrations/README.md](migrations/README.md) for the migration model, naming
 
 ## Workspace packages
 
-| Package              | Path                  | Purpose                                |
-| -------------------- | --------------------- | -------------------------------------- |
-| `@whm/common`        | `common/`             | Shared TS (chains, wallet, migration)  |
-| `@whm/contracts`     | `contracts/`          | Foundry project + per-package scripts  |
-| `@whm/crates-solana` | `crates/solana/`      | Anchor workspace + per-package scripts |
-| `@whm/broadcaster`   | `agents/broadcaster/` | Solana → Wormhole price/rate publisher |
-| `@whm/bjscan`        | `agents/bjscan/`      | Basejump indexer + Fastify API         |
-
-`agents/mrelayer` ships its own `package-lock.json` and is intentionally NOT a pnpm workspace member.
+| Package              | Path                  | Purpose                                      |
+| -------------------- | --------------------- | -------------------------------------------- |
+| `@whm/common`        | `common/`             | Shared TS (chains, wallet, migration)        |
+| `@whm/contracts`     | `contracts/`          | Foundry project + per-package scripts        |
+| `@whm/crates-solana` | `crates/solana/`      | Anchor workspace + per-package scripts       |
+| `@whm/broadcaster`   | `agents/broadcaster/` | Solana → Wormhole price/rate publisher       |
+| `@whm/scan`          | `agents/scan/`        | Basejump + Intents indexer + Fastify API     |
+| `@whm/relayer`       | `agents/relayer/`     | Wormhole VAA relayer (hydration-ntt, intent) |
+| `@whm/quoter`        | `agents/quoter/`      | Relay-fee quoter                             |
+| `@whm/nintent`       | `agents/nintent/`     | Intent deposit notifier (1Click)             |

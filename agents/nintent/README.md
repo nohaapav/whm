@@ -14,7 +14,7 @@ OneClickService.submitDepositTx({ depositAddress, txHash });
 so 1Click detects the deposit immediately instead of waiting on its own chain scan. The ops scripts
 ([`nirViaWtt.ts`](../../contracts/scripts/nirViaWtt.ts),
 [`nirRelay.ts`](../../contracts/scripts/nirRelay.ts)) do this inline after relaying; `nintent` is the
-equivalent for the live relayer ([`mrelayer` `app-intent`](../mrelayer/src/app-intent.ts)), which
+equivalent for the live relayer ([`relayer` intent feature](../relayer/src/features/intent/index.ts)), which
 relays but does not notify.
 
 Push, not poll: viem's `watchContractEvent` over a `webSocket` transport opens an `eth_subscribe` log

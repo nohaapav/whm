@@ -4,13 +4,13 @@ pragma solidity ^0.8.22;
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-import {Basejump} from "../../src/basejump/Basejump.sol";
-import {BasejumpMessageReceiver} from "../../src/basejump/BasejumpMessageReceiver.sol";
+import {BasejumpEmitter} from "../../src/basejump/BasejumpEmitter.sol";
+import {BasejumpReceiver} from "../../src/basejump/BasejumpReceiver.sol";
 import {BasejumpLanding} from "../../src/basejump/BasejumpLanding.sol";
 import {MessageReceiver} from "../../src/MessageReceiver.sol";
 
-import {IBasejump} from "../../src/basejump/interfaces/IBasejump.sol";
-import {IBasejumpCore} from "../../src/basejump/interfaces/IBasejumpCore.sol";
+import {IBasejumpEmitter} from "../../src/basejump/interfaces/IBasejumpEmitter.sol";
+import {IBasejumpPayload} from "../../src/basejump/interfaces/IBasejumpPayload.sol";
 import {IBasejumpLanding} from "../../src/basejump/interfaces/IBasejumpLanding.sol";
 
 import {MockWormhole} from "../mocks/MockWormhole.sol";
@@ -51,12 +51,11 @@ contract MockERC20 {
 /// @title BasejumpIntegrationTest
 /// @notice The direct Base → Hydration corridor, end to end:
 ///
-///   Base      Basejump.bridgeViaWormhole → NTT settlement (gross) + fast-path VAA (net)
-///   Hydration Basejump.completeTransfer  → _executeTransfer → BasejumpLanding.transfer
+///   Base      BasejumpEmitter.bridgeViaWormhole → NTT settlement (gross) + fast-path VAA (net)
+///   Hydration BasejumpReceiver.completeTransfer → BasejumpLanding.transfer
 ///
-/// Both deployments are the SAME contract; only configuration separates the roles. No Moonbeam,
-/// no BasejumpProxy, no XcmTransactor, no TokenBridge — see BasejumpProxyTest for the proxy hop
-/// that the intents BJP variant still uses.
+/// Two contracts, one per role: neither carries the other s entrypoints. Direct NTT, no
+/// intermediate proxy hop, no XcmTransactor, no TokenBridge.
 contract BasejumpIntegrationTest is Test, MockWormhole {
     using BasejumpTestHelpers for *;
 
@@ -104,9 +103,9 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
     // ─── Deployments ────────────────────────────────────────────────
 
     /// @dev Source — publishes the fast-path VAA, settles via NTT.
-    Basejump public basejumpBase;
+    BasejumpEmitter public basejumpBase;
     /// @dev Hydration — verifies the VAA and calls the landing. No outbound path.
-    BasejumpMessageReceiver public basejumpHydration;
+    BasejumpReceiver public basejumpHydration;
     BasejumpLanding public landing;
 
     MockNttManager public nttManager;
@@ -128,18 +127,18 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
         usdcHydration = new MockERC20();
 
         // Source deployment (Base). tokenBridge = 0x0 — the NTT path never reads it.
-        Basejump sourceImpl = new Basejump();
-        basejumpBase = Basejump(
+        BasejumpEmitter sourceImpl = new BasejumpEmitter();
+        basejumpBase = BasejumpEmitter(
             address(
                 new ERC1967Proxy(
-                    address(sourceImpl), abi.encodeCall(Basejump.initialize, (address(this), address(0)))
+                    address(sourceImpl), abi.encodeCall(BasejumpEmitter.initialize, (address(this)))
                 )
             )
         );
 
         // Receiver deployment (Hydration). No tokenBridge argument — it only receives.
-        BasejumpMessageReceiver recvImpl = new BasejumpMessageReceiver();
-        basejumpHydration = BasejumpMessageReceiver(
+        BasejumpReceiver recvImpl = new BasejumpReceiver();
+        basejumpHydration = BasejumpReceiver(
             address(
                 new ERC1967Proxy(
                     address(recvImpl), abi.encodeCall(MessageReceiver.initialize, (address(this)))
@@ -155,7 +154,7 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
         // ── Source config: settle via NTT to the landing on chain 73 ──
         nttManager = new MockNttManager(address(usdcBase));
         basejumpBase.setNttManager(address(usdcBase), address(nttManager));
-        basejumpBase.setLandingDest(BasejumpTestHelpers.addressToBytes32(address(landing)));
+        basejumpBase.setLanding(BasejumpTestHelpers.addressToBytes32(address(landing)));
         basejumpBase.setAssetFee(address(usdcBase), BASEJUMP_FEE);
 
         // ── Receiver config: trust the source, deliver into the landing ──
@@ -181,9 +180,13 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
     // ─── Helpers ────────────────────────────────────────────────────
 
     function _bridge(uint256 amount) internal returns (uint64 transferSeq) {
+        return _bridge(amount, "");
+    }
+
+    function _bridge(uint256 amount, bytes memory data) internal returns (uint64 transferSeq) {
         vm.startPrank(user);
         usdcBase.approve(address(basejumpBase), amount);
-        (transferSeq,) = basejumpBase.bridgeViaWormhole(address(usdcBase), amount, hydrationRecipient, "");
+        (transferSeq,) = basejumpBase.bridgeViaWormhole(address(usdcBase), amount, hydrationRecipient, data);
         vm.stopPrank();
     }
 
@@ -196,7 +199,7 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
     // ─── Configuration ──────────────────────────────────────────────
 
     function testDeploymentConfiguration() public view {
-        assertEq(basejumpBase.HYDRATION_CHAIN_ID(), HYDRATION_CHAIN_ID, "wrong settlement chain");
+        assertEq(basejumpBase.DEST_CHAIN_ID(), HYDRATION_CHAIN_ID, "wrong settlement chain");
         assertEq(basejumpBase.nttManagerFor(address(usdcBase)), address(nttManager), "no NTT route");
         assertEq(
             basejumpHydration.authorizedEmitters(BASE_CHAIN_ID),
@@ -219,7 +222,7 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
     ///         the fast path pays out of. Two slots on two chains, set by two migrations.
     function testPoolBinding() public view {
         assertEq(
-            basejumpBase.landingDest(),
+            basejumpBase.landing(),
             basejumpHydration.landing(),
             "settlement recipient and payout pool must be the same contract"
         );
@@ -254,8 +257,8 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
         MockNttManager.TransferRecord memory settled = nttManager.getTransfer(transferSeq);
         assertEq(settled.amount, TRANSFER_AMOUNT, "settlement gets gross");
 
-        IBasejumpCore.TransferPayload memory published =
-            abi.decode(lastPublishedPayload(), (IBasejumpCore.TransferPayload));
+        IBasejumpPayload.TransferPayload memory published =
+            abi.decode(lastPublishedPayload(), (IBasejumpPayload.TransferPayload));
         assertEq(published.amount, TRANSFER_AMOUNT - BASEJUMP_FEE, "fast path carries net");
         assertEq(settled.amount - published.amount, BASEJUMP_FEE, "fee accrual broken");
     }
@@ -272,13 +275,48 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
             "settlement recipient must be the payout pool"
         );
 
-        IBasejumpCore.TransferPayload memory published =
-            abi.decode(lastPublishedPayload(), (IBasejumpCore.TransferPayload));
+        IBasejumpPayload.TransferPayload memory published =
+            abi.decode(lastPublishedPayload(), (IBasejumpPayload.TransferPayload));
         assertEq(published.amount, expectedNet, "published message must carry net");
         assertEq(published.sourceAsset, address(usdcBase), "wrong sourceAsset published");
         assertEq(published.recipient, hydrationRecipient, "wrong recipient published");
         assertEq(published.transferSequence, transferSeq, "settlement sequence not correlated");
         assertEq(lastPublishedConsistency(), 200, "must publish at instant finality");
+    }
+
+    /// @notice `data` is the inbound-intent channel: a recipient that is a Hydration contract needs
+    ///         to know what to do with the funds, not just receive them. Neither end may touch the
+    ///         bytes, so this pins them at both ends — the payload the emitter published, and the
+    ///         argument the receiver hands the landing. Without the second assertion an end that
+    ///         silently dropped `data` would still pass.
+    function testDataForwardedEndToEnd() public {
+        bytes memory intentData = abi.encode(keccak256("intent-1"), makeAddr("depositAddress"));
+        uint64 transferSeq = _bridge(TRANSFER_AMOUNT, intentData);
+
+        IBasejumpPayload.TransferPayload memory published =
+            abi.decode(lastPublishedPayload(), (IBasejumpPayload.TransferPayload));
+        assertEq(published.data, intentData, "emitter must publish data untouched");
+
+        uint256 expectedNet = TRANSFER_AMOUNT - BASEJUMP_FEE;
+        bytes memory vaa = BasejumpTestHelpers.buildFastPathVAA(
+            BASE_CHAIN_ID,
+            address(basejumpBase),
+            address(usdcBase),
+            expectedNet,
+            hydrationRecipient,
+            transferSeq,
+            intentData
+        );
+
+        // The deployed landing discards `data`, so the observable is the call it receives.
+        vm.expectCall(
+            address(landing),
+            abi.encodeCall(
+                IBasejumpLanding.transfer,
+                (address(usdcBase), expectedNet, hydrationRecipient, intentData)
+            )
+        );
+        basejumpHydration.completeTransfer(vaa);
     }
 
     // ─── Liquidity ──────────────────────────────────────────────────
@@ -342,7 +380,7 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
     }
 
     /// @notice Atomicity: a landing revert rolls the whole receiveMessage back, leaving the VAA
-    ///         unconsumed so the relayer can retry. The Moonbeam hop could not do this — it marked
+    ///         unconsumed so the relayer can retry. The old proxy hop could not do this — it marked
     ///         the VAA processed before knowing whether delivery landed.
     function testLandingRevertRollsBackProcessedVaa() public {
         bytes memory vaa = _vaa(TRANSFER_AMOUNT - BASEJUMP_FEE, 1);
@@ -376,22 +414,22 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
 
     function testZeroAmountReverts() public {
         vm.prank(user);
-        vm.expectRevert(IBasejumpCore.ZeroAmount.selector);
+        vm.expectRevert(IBasejumpEmitter.ZeroAmount.selector);
         basejumpBase.bridgeViaWormhole(address(usdcBase), 0, hydrationRecipient, "");
     }
 
-    function testBasejumpLandingNotSet() public {
-        Basejump impl = new Basejump();
-        Basejump fresh = Basejump(
+    function testLandingNotSet() public {
+        BasejumpEmitter impl = new BasejumpEmitter();
+        BasejumpEmitter fresh = BasejumpEmitter(
             address(
-                new ERC1967Proxy(address(impl), abi.encodeCall(Basejump.initialize, (address(this), address(0))))
+                new ERC1967Proxy(address(impl), abi.encodeCall(BasejumpEmitter.initialize, (address(this))))
             )
         );
 
         vm.startPrank(user);
         usdcBase.approve(address(fresh), TRANSFER_AMOUNT);
         vm.expectRevert(
-            abi.encodeWithSelector(IBasejumpCore.BasejumpLandingNotSet.selector, HYDRATION_CHAIN_ID)
+            IBasejumpEmitter.LandingNotSet.selector
         );
         fresh.bridgeViaWormhole{value: 1 ether}(address(usdcBase), TRANSFER_AMOUNT, hydrationRecipient, "");
         vm.stopPrank();
@@ -421,7 +459,7 @@ contract BasejumpIntegrationTest is Test, MockWormhole {
         vm.startPrank(user);
         unrouted.approve(address(basejumpBase), TRANSFER_AMOUNT);
         vm.expectRevert(
-            abi.encodeWithSelector(IBasejump.SettlementRouteNotSet.selector, address(unrouted))
+            abi.encodeWithSelector(IBasejumpEmitter.SettlementRouteNotSet.selector, address(unrouted))
         );
         basejumpBase.bridgeViaWormhole(address(unrouted), TRANSFER_AMOUNT, hydrationRecipient, "");
         vm.stopPrank();

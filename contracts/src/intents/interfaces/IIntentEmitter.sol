@@ -2,67 +2,79 @@
 pragma solidity ^0.8.22;
 
 /// @title IIntentEmitter — Hydration entry point for NEAR-Intents bridging
-/// @notice User picks asset A (held on Hydration) and a destination asset B (on NEAR).
-///         IntentEmitter sells `amountIn` of A for WETH on Hydration, then dispatches a
-///         polkadotXcm.send message to Moonbeam that triggers BasejumpProxy.bridgeViaWormhole
-///         for the swapped amount. The ETH ultimately lands at the OneClick quote's
-///         `intentDepositAddress` on Ethereum and enters the ETH→B quote.
+/// @notice One operation: `placeOrder` sells an asset for WETH and settles it to an address on
+///         Ethereum, publishing the forwarding instruction beside it.
+///
+///         It has no opinion about why an address was chosen, so a derived intents account and a
+///         throwaway 1Click quote address are served by the same call. Nothing off-chain is needed
+///         when placing one, which is what lets an on-chain scheduler drive it.
+///
+/// @dev The standing authorization a derived account comes from is published by
+///      `IntentQuoteEmitter`, which owns its own Wormhole emitter address.
 interface IIntentEmitter {
+
     // ─── Events ──────────────────────────────────────────────────
 
-    /// @param intentId      UI-computed correlation hash (threaded into the Basejump payload)
-    /// @param caller        the Hydration account that initiated the bridge
-    /// @param assetIn       Hydration asset id of A sold
-    /// @param amountIn      amount of A sold
-    /// @param ethOut        WETH received from the sell and bridged (the quote's origin amount)
-    /// @param intentDepositAddress OneClick quote deposit address on Ethereum
-    event BridgeInitiated(
-        bytes32 indexed intentId,
+    /// @param transferSequence The NTT manager's sequence — the key the receiver matches the
+    ///        settlement and its instruction on
+    /// @param depositAddress Where the receiver forwards, net of the relay fee
+    /// @param caller Who placed the order
+    /// @param assetIn Hydration asset id sold
+    /// @param amountIn Amount of `assetIn` pulled from the caller
+    /// @param ethOut ETH the settlement carries — net of both rails' fees, quantized
+    /// @param maxRelayFee Ceiling a redeemer may claim on Ethereum
+    event OrderPlaced(
+        uint64 indexed transferSequence,
+        address indexed depositAddress,
         address indexed caller,
-        uint32 indexed assetIn,
+        uint32 assetIn,
         uint256 amountIn,
         uint256 ethOut,
-        address intentDepositAddress
+        uint256 maxRelayFee
     );
 
-    event XcmOperatorUpdated(address indexed operator, bool enabled);
-    event XcmDefaultsUpdated(
-        uint256 xcmFee, uint256 xcmExecutionFee, uint64 gasLimit, uint64 transactRefTime, uint64 transactProofSize
-    );
+    event Swept(address indexed asset, address indexed to, uint256 amount);
 
     // ─── Errors ──────────────────────────────────────────────────
 
     error NotOwner();
-    error NotXcmOperator();
-    error ZeroAmount();
-    error InvalidDepositAddress();
-    error InsufficientOutput();
-    error DispatchFailed();
     error NotConfigured();
+    error ZeroAmount();
+    error DispatchFailed();
+    error InsufficientOutput();
+    error InvalidDepositAddress();
+    error SettlementRouteMismatch(address expected, address actual);
+
+    /// @dev The swap did not even cover the rail's own delivery price, so nothing would bridge.
+    error AmountBelowDeliveryPrice(uint256 ethOut, uint256 deliveryPrice);
+    /// @dev What was left after the delivery price is below one unit of the rail's precision.
+    error AmountBelowTrimUnit(uint256 ethOut, uint256 trimUnit);
+    /// @dev A ceiling that swallows the delivery leaves the receiver nothing to forward.
+    error RelayFeeExceedsAmount(uint256 maxRelayFee, uint256 amount);
 
     // ─── Core ────────────────────────────────────────────────────
 
-    /// @param assetIn        Hydration asset id of A
-    /// @param amountIn       total amount of A pulled from the caller
-    /// @param minEthOut      slippage floor on the WETH bridged out (reverts InsufficientOutput below it).
-    ///                       Applies on every path — including A==WETH, where the bridged amount is
-    ///                       amountIn minus the WETH spent buying the GLMR fee.
-    /// @param maxFeeIn       max amount of A to spend buying the GLMR cross-chain fee (slippage bound on
-    ///                       the fee leg). Ignored when A is GLMR — there the fee is withheld, not bought.
-    /// @param intentId       UI-computed correlation hash
-    /// @param intentDepositAddress OneClick quote's Ethereum deposit address
-    /// @param maxRelayFee    ceiling on the destination relay fee, carried in the bridged payload.
-    ///                       Only the direct-TokenBridge variant (IntentEmitterWtt) embeds it; the
-    ///                       Basejump variant ignores it.
-    function swapAndBridge(
+    /// @notice Sell `amountIn` of `assetIn` for WETH and settle it toward `depositAddress` on
+    ///         Ethereum, publishing the forwarding instruction beside it.
+    /// @param minEthOut Floor on what arrives — after the swap, both rails' fees, and quantization.
+    ///        Rounded down to the rail's precision.
+    /// @param depositAddress Ethereum recipient. A derived intents account's deposit address, or a
+    ///        1Click quote address — this contract cannot tell the two apart and does not try.
+    /// @param maxRelayFee Ceiling a redeemer may claim on Ethereum. Committed by the caller rather
+    ///        than operator-set: paired with a colluding relayer, a ceiling is a claim on the
+    ///        order, so it belongs to whoever's funds are at risk. A schedule stores it beside
+    ///        `depositAddress`, so placing one still needs nothing off-chain.
+    /// @dev Not payable: both fees come out of the swap output, so a scheduler funds nothing. The
+    ///      settlement is addressed to `intentReceiver`, not to `depositAddress` — NTT carries no
+    ///      payload, so the destination travels as its own message matched on `transferSequence`.
+    /// @return transferSequence The NTT manager's sequence for the settlement
+    function placeOrder(
         uint32 assetIn,
         uint256 amountIn,
         uint256 minEthOut,
-        uint256 maxFeeIn,
-        bytes32 intentId,
-        address intentDepositAddress,
+        address depositAddress,
         uint256 maxRelayFee
-    ) external;
+    ) external returns (uint64 transferSequence);
 
     // ─── Admin ───────────────────────────────────────────────────
 

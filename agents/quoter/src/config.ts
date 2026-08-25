@@ -15,7 +15,7 @@ export const config = {
   ethereum: {
     rpc: req("ETH_RPC"),
     wrappedNative: req("ETH_WRAPPED_NATIVE") as Address,
-    gasLimit: BigInt(process.env.ETH_GAS_LIMIT ?? "150000"),
+    gasLimit: BigInt(process.env.ETH_GAS_LIMIT ?? "500000"),
     gasPricingAssetId: Number(req("ETH_GAS_PRICING_ASSET_ID")),
   } satisfies EthConfig,
 };

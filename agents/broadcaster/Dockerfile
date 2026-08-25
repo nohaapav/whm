@@ -2,6 +2,8 @@ FROM node:23-slim
 
 WORKDIR /app
 
-COPY dist/index.js .
+COPY dist/ ./
 
-CMD ["node", "index.js"]
+# One image, one entry point per app. The service picks it:
+#   command: [node, oracle-ethereum/app.js]
+CMD ["node", "oracle-solana/app.js"]

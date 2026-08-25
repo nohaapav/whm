@@ -95,7 +95,7 @@ interface Artifact {
 const artifact = (path: string): Artifact =>
   JSON.parse(readFileSync(resolve(OUT, path), "utf8")) as Artifact;
 
-const BASEJUMP = artifact("Basejump.sol/Basejump.json");
+const RECEIVER = artifact("BasejumpReceiver.sol/BasejumpReceiver.json");
 const LANDING = artifact("BasejumpLanding.sol/BasejumpLanding.json");
 const PROXY = artifact("ERC1967Proxy.sol/ERC1967Proxy.json");
 
@@ -177,7 +177,7 @@ async function buildSignedVaa(opts: {
   return { vaa, hash };
 }
 
-/** The fast-path payload: abi.encode(IBasejumpCore.TransferPayload). */
+/** The fast-path payload: abi.encode(IBasejumpPayload.TransferPayload). */
 function transferPayload(sourceAsset: Hex, amount: bigint, recipient: Hex, seq: bigint): Hex {
   return encodeAbiParameters(
     [
@@ -262,24 +262,24 @@ async function main(): Promise<void> {
     );
     console.log(`\n   BasejumpLanding   ${landing}`);
 
-    const { address: bjImpl } = await client.deploy(BASEJUMP.bytecode.object);
-    const { address: basejump, res: bjRes } = await client.deploy(
+    const { address: recvImpl } = await client.deploy(RECEIVER.bytecode.object);
+    const { address: receiver, res: recvRes } = await client.deploy(
       encodeDeployData({
         abi: PROXY.abi,
         bytecode: PROXY.bytecode.object,
         args: [
-          bjImpl,
+          recvImpl,
           encodeFunctionData({
-            abi: BASEJUMP.abi,
+            abi: RECEIVER.abi,
             functionName: "initialize",
-            args: [MESSAGE_CORE, "0x0000000000000000000000000000000000000000"],
+            args: [MESSAGE_CORE],
           }),
         ],
       }) as Hex,
     );
-    console.log(`   Basejump receiver ${basejump}`);
+    console.log(`   BasejumpReceiver  `);
 
-    const deployEvents = await eventsAt(hydration, bjRes.blockHash);
+    const deployEvents = await eventsAt(hydration, recvRes.blockHash);
     if (!evmSucceeded(deployEvents)) {
       logEvents(deployEvents);
       throw new Error("receiver deploy did not succeed");
@@ -295,12 +295,12 @@ async function main(): Promise<void> {
       }
     };
 
-    await wire(basejump, BASEJUMP.abi, "setAuthorizedEmitter", [
+    await wire(receiver, RECEIVER.abi, "setAuthorizedEmitter", [
       BASE_CHAIN_ID,
       pad(SOURCE_BASEJUMP, { size: 32 }),
     ]);
-    await wire(basejump, BASEJUMP.abi, "setLanding", [pad(landing, { size: 32 })]);
-    await wire(landing, LANDING.abi, "setAuthorizedBridge", [basejump, true]);
+    await wire(receiver, RECEIVER.abi, "setLanding", [pad(landing, { size: 32 })]);
+    await wire(landing, LANDING.abi, "setAuthorizedBridge", [receiver, true]);
     await wire(landing, LANDING.abi, "setDestAsset", [EURC_BASE, EURC_HYDRATION]);
     console.log(`   wired: emitter(30) · landing · authorizedBridge · destAssetFor(EURC)`);
 
@@ -327,9 +327,9 @@ async function main(): Promise<void> {
     console.log(`   VAA ${(vaa.length - 2) / 2} bytes, 1 signature, set ${GUARDIAN_SET_INDEX}`);
 
     const res = await client.call(
-      basejump,
+      receiver,
       encodeFunctionData({
-        abi: BASEJUMP.abi,
+        abi: RECEIVER.abi,
         functionName: "completeTransfer",
         args: [vaa],
       }) as Hex,
@@ -354,9 +354,9 @@ async function main(): Promise<void> {
 
     // ── replay protection: the same VAA must not pay twice ──
     const replay = await client.call(
-      basejump,
+      receiver,
       encodeFunctionData({
-        abi: BASEJUMP.abi,
+        abi: RECEIVER.abi,
         functionName: "completeTransfer",
         args: [vaa],
       }) as Hex,
@@ -385,9 +385,9 @@ async function main(): Promise<void> {
       payload: transferPayload(EURC_BASE, oversized, RECIPIENT, 11n),
     });
     const queued = await client.call(
-      basejump,
+      receiver,
       encodeFunctionData({
-        abi: BASEJUMP.abi,
+        abi: RECEIVER.abi,
         functionName: "completeTransfer",
         args: [bigVaa],
       }) as Hex,
