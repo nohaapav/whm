@@ -1,4 +1,4 @@
-import { opt, optNum, req } from "./env";
+import { opt, optNum, req, reqPrivateKey} from "./env";
 
 /** Hydration's EVM chain id — asserted at startup so a misconfigured RPC fails loudly. */
 export const HYDRATION_EVM_CHAIN_ID = 222222;
@@ -11,7 +11,7 @@ export function hydrationConfig() {
      */
     name: opt("APP_NAME", "hydration-ntt-relayer"),
 
-    privateKey: req("PRIVKEY") as `0x${string}`,
+    privateKey: reqPrivateKey("PRIVKEY"),
     rpc: opt("HYDRATION_RPC", "https://hydration-rpc.n.dwellir.com"),
 
     /** Cold-start floors per origin chain; ignored once a safeSequence exists in Redis. */

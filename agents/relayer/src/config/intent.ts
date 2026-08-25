@@ -1,4 +1,4 @@
-import { opt, optNum, req, reqAddress } from "./env";
+import { opt, optNum, req, reqAddress, reqPrivateKey} from "./env";
 
 /** Hydration's Wormhole chain id. Absent from relayer-engine's SDK, which predates the chain. */
 export const HYDRATION_CHAIN = 73;
@@ -12,7 +12,7 @@ export function intentConfig() {
     name: opt("INTENT_APP_NAME", "intent-relayer"),
 
     /** Reimbursed signing wallet, separate from the generic relayer key. */
-    privateKey: req("INTENT_PRIVKEY") as `0x${string}`,
+    privateKey: reqPrivateKey("INTENT_PRIVKEY"),
 
     /** WormholeTransceiver (WETH) on Hydration — publishes the settlement we subscribe to. */
     transceiver: reqAddress("NTT_TRANSCEIVER"),

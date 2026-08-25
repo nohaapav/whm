@@ -139,7 +139,11 @@ export function createQueue(deps: QueueDeps) {
       task.logger.info(`Next nonce: ${++nonce}`);
       void task.next();
     } catch (e) {
-      const text = JSON.stringify(e) + ((e as Error).message ?? "");
+      // BigInt-safe: viem errors carry gas/value fields, and a raw stringify would throw
+      // inside this catch — killing the process on the one path that must survive.
+      const text =
+        JSON.stringify(e, (_, v) => (typeof v === "bigint" ? v.toString() : v)) +
+        ((e as Error).message ?? "");
       if (isDone(text)) {
         task.logger.info(`${task.label} already completed`);
         void task.next();

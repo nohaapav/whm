@@ -22,6 +22,12 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
+// src/fetch.ts
+var nativeFetch = globalThis.fetch;
+function restoreNativeFetch() {
+  if (nativeFetch) globalThis.fetch = nativeFetch;
+}
+
 // src/logger.ts
 var winston = __toESM(require("winston"));
 var logger_default = winston.createLogger({
@@ -51,6 +57,14 @@ function reqAddress(name) {
   if (!(0, import_viem.isAddress)(v)) throw new Error(`${name} is not a valid address: ${v}`);
   return v;
 }
+function reqPrivateKey(name) {
+  const raw = req(name).trim();
+  const hex = raw.startsWith("0x") || raw.startsWith("0X") ? raw.slice(2) : raw;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error(`${name} is not a 32-byte hex private key (got ${hex.length} hex chars)`);
+  }
+  return `0x${hex.toLowerCase()}`;
+}
 function opt(name, fallback) {
   return process.env[name] || fallback;
 }
@@ -77,7 +91,7 @@ function hydrationConfig() {
      * existing queue and missed-VAA cursors. See engine/app.ts.
      */
     name: opt("APP_NAME", "hydration-ntt-relayer"),
-    privateKey: req("PRIVKEY"),
+    privateKey: reqPrivateKey("PRIVKEY"),
     rpc: opt("HYDRATION_RPC", "https://hydration-rpc.n.dwellir.com"),
     /** Cold-start floors per origin chain; ignored once a safeSequence exists in Redis. */
     fromSequence: {
@@ -202,7 +216,7 @@ function createQueue(deps) {
       task.logger.info(`Next nonce: ${++nonce}`);
       void task.next();
     } catch (e) {
-      const text = JSON.stringify(e) + (e.message ?? "");
+      const text = JSON.stringify(e, (_, v) => typeof v === "bigint" ? v.toString() : v) + (e.message ?? "");
       if (isDone(text)) {
         task.logger.info(`${task.label} already completed`);
         void task.next();
@@ -464,7 +478,7 @@ function intentConfig() {
      */
     name: opt("INTENT_APP_NAME", "intent-relayer"),
     /** Reimbursed signing wallet, separate from the generic relayer key. */
-    privateKey: req("INTENT_PRIVKEY"),
+    privateKey: reqPrivateKey("INTENT_PRIVKEY"),
     /** WormholeTransceiver (WETH) on Hydration — publishes the settlement we subscribe to. */
     transceiver: reqAddress("NTT_TRANSCEIVER"),
     /** IntentEmitter on Hydration — publishes the forwarding instruction beside each settlement. */
@@ -687,6 +701,136 @@ async function start2() {
   await app.listen();
 }
 
+// src/features/oracle/index.ts
+var import_viem9 = require("viem");
+var import_accounts3 = require("viem/accounts");
+
+// src/config/oracle.ts
+function oracleConfig() {
+  return {
+    /**
+     * Engine namespace. LOAD-BEARING — every Redis key derives from it. Renaming orphans the
+     * existing queue and missed-VAA cursors. See engine/app.ts.
+     */
+    name: opt("ORACLE_APP_NAME", "oracle-relayer"),
+    privateKey: reqPrivateKey("ORACLE_PRIVKEY"),
+    rpc: opt("HYDRATION_RPC", "https://hydration-rpc.n.dwellir.com"),
+    /** Cold-start floors per origin chain; ignored once a safeSequence exists in Redis. */
+    fromSequence: {
+      solana: BigInt(opt("ORACLE_SOLANA_FROM_SEQ", "0")),
+      ethereum: BigInt(opt("ORACLE_ETH_FROM_SEQ", "0"))
+    },
+    discordWebhook: process.env.DISCORD_WEBHOOK_URL,
+    warnMultiplier: BigInt(opt("GAS_WARN_MULTIPLIER", "50")),
+    retries: optNum("ORACLE_RETRIES", 8)
+  };
+}
+
+// src/features/oracle/routes.ts
+var CHAIN2 = {
+  solana: 1,
+  ethereum: 2
+};
+var ORACLE_ROUTES = [
+  {
+    source: "solana",
+    sourceChain: CHAIN2.solana,
+    sourceEmitter: "AN6yxTepWFFjQWbo4448bNHHQR1Je48ppTkgBEpZ1SoJ",
+    receiver: "0x582e2fac5af62dc024396b5e7f549c72273a69c3"
+  },
+  {
+    source: "ethereum",
+    sourceChain: CHAIN2.ethereum,
+    sourceEmitter: "0xfbf682642a6a28760e717b637f12d014bd5db4b9",
+    receiver: "0x6913770466fed4dbc24337cd7f1ae92af4321083"
+  }
+];
+
+// src/features/oracle/index.ts
+var receiverAbi2 = (0, import_viem9.parseAbi)(["function receiveMessage(bytes vaa) external"]);
+var hydrationChain2 = (0, import_viem9.defineChain)({
+  id: HYDRATION_EVM_CHAIN_ID,
+  name: "Hydration",
+  nativeCurrency: { name: "WETH", symbol: "WETH", decimals: 18 },
+  rpcUrls: { default: { http: [] } }
+});
+function oracleFeature() {
+  return { name: "oracle", start: start3 };
+}
+async function start3() {
+  const cfg = oracleConfig();
+  const account = (0, import_accounts3.privateKeyToAccount)(cfg.privateKey);
+  const publicClient = (0, import_viem9.createPublicClient)({ chain: hydrationChain2, transport: (0, import_viem9.http)(cfg.rpc) });
+  const wallet = (0, import_viem9.createWalletClient)({ account, chain: hydrationChain2, transport: (0, import_viem9.http)(cfg.rpc) });
+  const chainId = await publicClient.getChainId();
+  if (chainId !== HYDRATION_EVM_CHAIN_ID) {
+    throw new Error(`HYDRATION_RPC returned chain ${chainId}; expected ${HYDRATION_EVM_CHAIN_ID}`);
+  }
+  const queue = createQueue({
+    publicClient,
+    account,
+    discordWebhook: cfg.discordWebhook,
+    warnMultiplier: cfg.warnMultiplier
+  });
+  const nonce = await queue.init();
+  logger_default.info("Oracle relayer starting");
+  logger_default.info(`  account: ${account.address} (nonce ${nonce})`);
+  for (const route of ORACLE_ROUTES) {
+    logger_default.info(`  ${route.source} ${route.sourceEmitter} -> ${route.receiver}`);
+  }
+  async function deliver(route, vaaBytes, nonce2) {
+    const args = [`0x${vaaBytes.toString("hex")}`];
+    await publicClient.simulateContract({
+      address: route.receiver,
+      abi: receiverAbi2,
+      functionName: "receiveMessage",
+      args,
+      account
+    });
+    const fees = await hydrationFees(publicClient);
+    const call = {
+      address: route.receiver,
+      abi: receiverAbi2,
+      functionName: "receiveMessage",
+      args,
+      nonce: nonce2,
+      chain: hydrationChain2,
+      account
+    };
+    return fees.kind === "legacy" ? wallet.writeContract({ ...call, gasPrice: fees.gasPrice }) : wallet.writeContract({
+      ...call,
+      maxFeePerGas: fees.maxFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas
+    });
+  }
+  async function handle(route, ctx, next) {
+    const { vaa, sourceTxHash } = ctx;
+    const log = ctx.logger.child({
+      source: route.source,
+      sourceTxHash,
+      sequence: vaa.sequence.toString()
+    });
+    queue.add({
+      label: `${route.source} oracle`,
+      logger: log,
+      next,
+      submit: (n) => deliver(route, vaa.bytes, n)
+    });
+  }
+  const app = makeApp(engineConfig(), {
+    name: cfg.name,
+    retries: cfg.retries,
+    startingSequence: {
+      [CHAIN2.solana]: cfg.fromSequence.solana,
+      [CHAIN2.ethereum]: cfg.fromSequence.ethereum
+    }
+  });
+  for (const route of ORACLE_ROUTES) {
+    app.chain(route.sourceChain).address(route.sourceEmitter, ((ctx, next) => handle(route, ctx, next)));
+  }
+  await app.listen();
+}
+
 // src/index.ts
 var BANNER = String.raw`
  ██████╗ ███████╗██╗      █████╗ ██╗   ██╗███████╗██████╗
@@ -701,13 +845,15 @@ function enabled() {
   const features = [];
   if (process.env.INTENT_PRIVKEY) features.push(intentFeature());
   if (process.env.PRIVKEY) features.push(hydrationNttFeature());
+  if (process.env.ORACLE_PRIVKEY) features.push(oracleFeature());
   return features;
 }
 async function main() {
   console.log(BANNER);
+  restoreNativeFetch();
   const features = enabled();
   if (features.length === 0) {
-    throw new Error("Nothing to run: set INTENT_PRIVKEY and/or PRIVKEY.");
+    throw new Error("Nothing to run: set INTENT_PRIVKEY, PRIVKEY and/or ORACLE_PRIVKEY.");
   }
   logger_default.info(`Relayer starting: ${features.map((f) => f.name).join(", ")}`);
   await Promise.all(features.map((f) => f.start()));

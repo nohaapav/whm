@@ -1,6 +1,6 @@
 version: '3.3'
 services:
-  # One image, two services. A feature runs when its signing key is present, so each container
+  # One image, three services. A feature runs when its signing key is present, so each container
   # enables exactly one — and each keeps its own engine namespace, hence its own Redis state.
   hydration-ntt:
     image: galacticcouncil/relayer:latest
@@ -38,6 +38,27 @@ services:
       INTENT_RECEIVER: FILL THIS ADDRESS # IntentReceiver on Ethereum
       NTT_TRANSCEIVER: '0x8acce9CA511d5D7213F8C3f813B8916087cd00ae' # WETH transceiver on Hydration
       QUOTER_URL: http://quoter:8080 # reachable quoter service (deployed separately)
+      REDIS_HOST: redis
+      SPY_ENDPOINT: spy:7073
+      WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: 'true'
+
+  oracle:
+    image: galacticcouncil/relayer:latest
+    environment:
+      # ORACLE_APP_NAME is LOAD-BEARING — see the note above.
+      ORACLE_APP_NAME: oracle-relayer
+      HYDRATION_RPC: https://rpc.hydradx.cloud
+      # 0x-prefixed. Writes to the receivers; separate from PRIVKEY so the two do not share a nonce.
+      ORACLE_PRIVKEY: FILL THIS KEY ALWAYS
+      ORACLE_SOLANA_FROM_SEQ: '0'
+      ORACLE_ETH_FROM_SEQ: '0'
       REDIS_HOST: redis
       SPY_ENDPOINT: spy:7073
       WORMHOLE_API_KEY: MAYBE FILL THIS KEY OR REMOVE IT

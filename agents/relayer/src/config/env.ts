@@ -27,6 +27,24 @@ export function reqAddress(name: string): Address {
 }
 
 /**
+ * Read a required env var holding a secp256k1 private key.
+ *
+ * @param name Variable name.
+ * @returns The key, 0x-prefixed.
+ * @throws When unset, or not 32 bytes of hex.
+ * @remarks viem requires the prefix where ethers did not, so bare-hex keys carried over from an
+ *          earlier deployment are accepted and normalized rather than rejected at startup.
+ */
+export function reqPrivateKey(name: string): `0x${string}` {
+  const raw = req(name).trim();
+  const hex = raw.startsWith("0x") || raw.startsWith("0X") ? raw.slice(2) : raw;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error(`${name} is not a 32-byte hex private key (got ${hex.length} hex chars)`);
+  }
+  return `0x${hex.toLowerCase()}`;
+}
+
+/**
  * Read an optional env var with a fallback.
  *
  * @param name Variable name.
