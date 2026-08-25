@@ -1,0 +1,95 @@
+{
+  "migration": "oracle-relay-ethereum",
+  "environment": "prod",
+  "startedAt": "2026-08-25T08:01:35.137Z",
+  "completedAt": "2026-08-25T09:06:40.106Z",
+  "steps": [
+    {
+      "name": "001-deploy-emitter",
+      "status": "completed",
+      "output": {
+        "implAddress": "0x0456d9c942d6ef023e0b58ea195eef0488f8b188",
+        "proxyAddress": "0xfbf682642a6a28760e717b637f12d014bd5db4b9",
+        "ownerAddress": "0x6d116C3E43Bc1bFd4EEBe5c7BF043a342Ea6bBB2",
+        "wormholeCore": "0x98f3c9e6E3fAce36bAAd05FE09d375Ef1464288B"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:01:35.139Z",
+      "completedAt": "2026-08-25T08:02:17.640Z"
+    },
+    {
+      "name": "002-deploy-receiver",
+      "status": "completed",
+      "output": {
+        "implAddress": "0xa23e2dd67bd160a4872028e40096f2f3ba6cb3b5",
+        "proxyAddress": "0x6913770466fed4dbc24337cd7f1ae92af4321083",
+        "ownerAddress": "0x71FeB8b2849101a6E62e3369eaAfDc6154CD0Bc0"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:02:53.758Z",
+      "completedAt": "2026-08-25T08:03:16.062Z"
+    },
+    {
+      "name": "003-authorize-emitter@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0x373f5334fad1880142a77263e1adb1204270d037f036ed9eef76d497988a8e0a",
+        "emitterBytes32": "0x000000000000000000000000fbf682642a6a28760e717b637f12d014bd5db4b9",
+        "sourceChain": "2"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:03:16.064Z",
+      "completedAt": "2026-08-25T08:03:20.708Z"
+    },
+    {
+      "name": "004-register-wsteth@emitter",
+      "status": "completed",
+      "output": {
+        "assetId": "0x3725f7650a1fc235623c67881a5755db6c97d7575eddd7351396f0b26fe79334",
+        "source": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+        "call": "0x035faf82",
+        "txHash": "0xa14a90bc70eb5ed9514fdde704a03c1ebde0ca50a9da7df7a3546245326f2e99"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:03:20.709Z",
+      "completedAt": "2026-08-25T08:03:25.563Z"
+    },
+    {
+      "name": "005-register-apyusd@emitter",
+      "status": "completed",
+      "output": {
+        "assetId": "0xde11c6e5fbb09ebf287fceb58deeb4a0e34ccb69e2deeb25dfe46ad04e35a5a8",
+        "source": "0x38EEb52F0771140d10c4E9A9a72349A329Fe8a6A",
+        "call": "0x07a2d13a0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+        "txHash": "0xc37a21e88dfaa959ee1c8a0982b1103da796172f3bd132e675ab4048475d51c3"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:03:25.564Z",
+      "completedAt": "2026-08-25T08:03:42.527Z"
+    },
+    {
+      "name": "006-set-wsteth@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0x4d070e5e6dd4e1970258d8dd2d04fcde79a812a4b0b6ac2aee772b589f836b73",
+        "assetId": "0x3725f7650a1fc235623c67881a5755db6c97d7575eddd7351396f0b26fe79334",
+        "oracle": "0x35bEe05585c74462c9C40473B2E744537424C9FD"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:09:27.971Z",
+      "completedAt": "2026-08-25T08:09:29.096Z"
+    },
+    {
+      "name": "007-set-apyusd@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0xf04a11662cf3c3a0f03d01ea262d3faa9eea9cf17770720bdcbc65cd190ad70f",
+        "assetId": "0xde11c6e5fbb09ebf287fceb58deeb4a0e34ccb69e2deeb25dfe46ad04e35a5a8",
+        "oracle": "0x6a738A5B191FC7D68477C6e6480726bAAfB944Bd"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T08:09:57.354Z",
+      "completedAt": "2026-08-25T08:10:02.399Z"
+    }
+  ]
+}
