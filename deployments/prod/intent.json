@@ -1,0 +1,69 @@
+{
+  "migration": "intent",
+  "environment": "prod",
+  "startedAt": "2026-08-25T13:56:24.900Z",
+  "completedAt": "2026-08-25T13:57:27.013Z",
+  "steps": [
+    {
+      "name": "001-deploy-emitter",
+      "status": "completed",
+      "output": {
+        "implAddress": "0x8253ddf95812f816038ab3cc89b76f7cca780234",
+        "proxyAddress": "0x98f1ebc9dcc8ab7ba54d83c98500e9e313f793f2",
+        "ownerAddress": "0x71FeB8b2849101a6E62e3369eaAfDc6154CD0Bc0"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T13:56:24.901Z",
+      "completedAt": "2026-08-25T13:56:35.015Z"
+    },
+    {
+      "name": "002-deploy-receiver",
+      "status": "completed",
+      "output": {
+        "implAddress": "0xf3dfa160d807538b3882c77f0b96e27cf96150b1",
+        "proxyAddress": "0x2173f6ece25768e7efc5199f70f8783d88ba63c8",
+        "ownerAddress": "0x6d116C3E43Bc1bFd4EEBe5c7BF043a342Ea6bBB2"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T13:56:35.017Z",
+      "completedAt": "2026-08-25T13:57:01.409Z"
+    },
+    {
+      "name": "003-set-ntt-manager@emitter",
+      "status": "completed",
+      "output": {
+        "txHash": "0xd11e6d9baed27a4adadd1e133e2dd6ebbe2f23c50c2fabd879aef5d184d74a0e",
+        "emitter": "0x98f1ebc9dcc8ab7ba54d83c98500e9e313f793f2",
+        "manager": "0xB5cEf790D52A57fa619eD96eDd64c5328F3DCFb7"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T13:57:01.410Z",
+      "completedAt": "2026-08-25T13:57:07.765Z"
+    },
+    {
+      "name": "004-set-receiver@emitter",
+      "status": "completed",
+      "output": {
+        "txHash": "0x585f7b97adddc8fabad9713a500f6849d06a301048a4171cd7c4a34037ae2ad9",
+        "emitter": "0x98f1ebc9dcc8ab7ba54d83c98500e9e313f793f2",
+        "receiver": "0x2173f6ece25768e7efc5199f70f8783d88ba63c8"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T13:57:07.765Z",
+      "completedAt": "2026-08-25T13:57:09.798Z"
+    },
+    {
+      "name": "005-set-emitter@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0xc735e97c6fc4103ee3ae7a8222d236c8f5bd500bb8d05da96cd6d6d67e79a1d9",
+        "receiver": "0x2173f6ece25768e7efc5199f70f8783d88ba63c8",
+        "emitter": "0x98f1ebc9dcc8ab7ba54d83c98500e9e313f793f2",
+        "emitterAddress": "0x00000000000000000000000098f1ebc9dcc8ab7ba54d83c98500e9e313f793f2"
+      },
+      "error": null,
+      "startedAt": "2026-08-25T13:57:09.799Z",
+      "completedAt": "2026-08-25T13:57:27.013Z"
+    }
+  ]
+}
