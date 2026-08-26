@@ -85,6 +85,21 @@ export function rpc(chain: string, fallback: string): string {
 }
 
 /**
+ * A chain's cold-start floor, from `FROM_SEQ_<CHAIN>`.
+ *
+ * Consulted only while the app's namespace has no `safeSequence` in Redis — from the first run on,
+ * the engine resumes from its own cursor and this is ignored. Set it before a namespace's first run
+ * to skip a backlog the app was never meant to relay.
+ *
+ * @param chain Chain name, lowercase.
+ * @param fallback Sequence to start from when unset.
+ * @returns The floor.
+ */
+export function fromSeq(chain: string, fallback = 0n): bigint {
+  return BigInt(opt(`FROM_SEQ_${chain.toUpperCase()}`, fallback.toString()));
+}
+
+/**
  * Where a low/exhausted-gas alert goes, and when it fires. Both are env because an on-call operator
  * raises the threshold against a wallet that is spending faster than it is topped up, and waiting on
  * a rebuild to do it is no use.

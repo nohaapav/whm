@@ -2,7 +2,7 @@ import { parseAbi } from "viem";
 
 import { boot } from "../../boot";
 import { alerts, engineConfig, privateKey } from "../../config";
-import { makeApp } from "../../engine/app";
+import { createApp } from "../../engine/app";
 import { hydrationClients, receiveMessage } from "../../engine/hydration";
 import { isForManager, isNttTransfer } from "../../engine/ntt";
 import { createQueue } from "../../engine/queue";
@@ -62,7 +62,7 @@ async function start(): Promise<void> {
     });
   }
 
-  const app = makeApp(engineConfig(), {
+  const app = createApp(engineConfig(), {
     name: APP_NAME,
     retries: RETRIES,
     startingSequence: FROM_SEQUENCE,

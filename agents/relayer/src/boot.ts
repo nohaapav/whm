@@ -1,4 +1,10 @@
+// MUST come first: importing the Wormhole SDK (via ./chains) pulls cross-fetch, which replaces
+// globalThis.fetch with node-fetch@2. `fetch.ts` captures the real one at its own module load, so
+// it has to evaluate before anything that drags the SDK in — otherwise it captures the polyfill and
+// `restoreNativeFetch` restores nothing, and viem dies on `response.body.getReader is not a function`.
 import { restoreNativeFetch } from "./fetch";
+
+import { registerHydration } from "./chains";
 import logger from "./logger";
 
 const BANNER = String.raw`
@@ -23,6 +29,7 @@ const BANNER = String.raw`
 export function boot(name: string, start: () => Promise<void>): void {
   console.log(BANNER);
   restoreNativeFetch();
+  registerHydration();
   logger.info(`Relayer starting: ${name}`);
 
   start().catch((err) => {

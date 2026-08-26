@@ -5,7 +5,7 @@ import { mainnet } from "viem/chains";
 import { boot } from "../../boot";
 import { WORMHOLE } from "../../chains";
 import { alerts, engineConfig, privateKey } from "../../config";
-import { makeApp } from "../../engine/app";
+import { createApp } from "../../engine/app";
 import { onEmitter } from "../../engine/emitter";
 import { isNttTransfer, settlementSequence } from "../../engine/ntt";
 import { createQueue } from "../../engine/queue";
@@ -30,7 +30,7 @@ import { quoteRelayFee } from "./quote";
 import { route } from "./routes";
 
 /**
- * Intents v2 — Hydration settles WETH to Ethereum over NTT and publishes a forwarding instruction
+ * Intents — Hydration settles WETH to Ethereum over NTT and publishes a forwarding instruction
  * beside it. This pairs the two and calls IntentReceiver.processOrder, which delivers the
  * settlement, forwards it to the deposit address, and reimburses the caller.
  *
@@ -112,6 +112,7 @@ async function start(): Promise<void> {
     }
 
     if (!sourceTxHash) {
+      log.warn("Source tx hash unavailable; retrying...");
       throw new Error("Source tx hash unavailable; retrying...");
     }
 
@@ -138,10 +139,11 @@ async function start(): Promise<void> {
     const attempt = ctx.storage?.job?.attempts ?? 0;
     const fee = await quoteRelayFee();
     if (fee > order.maxRelayFee) {
-      throw new Error(
+      const reason =
         `Order ${sequence} unprofitable (attempt ${attempt}/${RETRIES}): ` +
-          `fee ${fee} > ceiling ${order.maxRelayFee}; retrying with backoff`,
-      );
+        `fee ${fee} > ceiling ${order.maxRelayFee}; retrying with backoff`;
+      log.warn(reason);
+      throw new Error(reason);
     }
 
     const instructionVaa = await fetchVaa(
@@ -164,7 +166,7 @@ async function start(): Promise<void> {
     });
   }
 
-  const app = makeApp(engineConfig(), {
+  const app = createApp(engineConfig(), {
     name: APP_NAME,
     retries: RETRIES,
     backoff: { baseMs: RETRY_BASE_MS, maxMs: RETRY_MAX_MS },

@@ -27,13 +27,21 @@ export interface AppOptions {
 }
 
 /**
- * Build a StandardRelayerApp for one role.
+ * Build the relayer app for one role.
  *
  * @param cfg Spy endpoint + Redis, shared by every role.
  * @param opts Namespace and retry policy for this role.
  * @returns The app, not yet listening.
  */
-export function makeApp(cfg: EngineConfig, opts: AppOptions): RelayerApp {
+export function createApp(cfg: EngineConfig, opts: AppOptions): RelayerApp {
+  // Namespace and floors decide what the missed-VAA worker rescans, and both are silent when wrong.
+  logger.info(
+    `  namespace:   ${opts.name}  floors ${JSON.stringify(opts.startingSequence ?? {}, (_, v) =>
+      typeof v === "bigint" ? v.toString() : v,
+    )}`,
+  );
+
+
   return new StandardRelayerApp<StandardRelayerContext>(Environment.MAINNET, {
     name: opts.name,
     logger,
@@ -41,10 +49,13 @@ export function makeApp(cfg: EngineConfig, opts: AppOptions): RelayerApp {
     redis: cfg.redis,
     ...(opts.retries ? { workflows: { retries: opts.retries } } : {}),
     ...(opts.backoff
-      ? { retryBackoffOptions: { baseDelayMs: opts.backoff.baseMs, maxDelayMs: opts.backoff.maxMs } }
+      ? {
+          retryBackoffOptions: { baseDelayMs: opts.backoff.baseMs, maxDelayMs: opts.backoff.maxMs },
+        }
       : {}),
     ...(opts.startingSequence
       ? { missedVaaOptions: { startingSequenceConfig: opts.startingSequence } }
       : {}),
   });
 }
+

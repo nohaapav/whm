@@ -1,4 +1,4 @@
-import { opt, rpc } from "../../config";
+import { fromSeq, opt, rpc } from "../../config";
 import { WORMHOLE } from "../../chains";
 
 /**
@@ -15,6 +15,6 @@ export const RETRIES = 8;
 
 /** Cold-start floor per origin chain; ignored once a safeSequence exists in Redis. */
 export const FROM_SEQUENCE = {
-  [WORMHOLE.solana]: 0n,
-  [WORMHOLE.ethereum]: 0n,
+  [WORMHOLE.solana]: fromSeq("solana"),
+  [WORMHOLE.ethereum]: fromSeq("ethereum"),
 };

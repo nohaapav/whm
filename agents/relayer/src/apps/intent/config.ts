@@ -1,4 +1,4 @@
-import { opt, rpc } from "../../config";
+import { fromSeq, opt, rpc } from "../../config";
 import { WORMHOLE } from "../../chains";
 
 /**
@@ -17,8 +17,13 @@ export const QUOTER_URL = opt("QUOTER_URL", "http://localhost:8080");
 /** Passed to the quoter so the fee reflects what processOrder actually costs. */
 export const GAS_LIMIT = "500000";
 
-/** Cold-start floor; ignored once a safeSequence exists in Redis. */
-export const FROM_SEQUENCE = { [WORMHOLE.hydration]: 0n };
+/**
+ * Cold-start floor; ignored once a safeSequence exists in Redis.
+ *
+ * The transceiver published 22 settlements before intents existed and none carries an instruction,
+ * so anything below this is work whose only outcome is "skip".
+ */
+export const FROM_SEQUENCE = { [WORMHOLE.hydration]: fromSeq("hydration") };
 
 /**
  * Re-quote and retry an unprofitable order before dropping it — gas can fall within minutes, so a

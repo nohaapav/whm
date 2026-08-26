@@ -33,8 +33,8 @@ forwards it to the order's `depositAddress`, and reimburses the caller. The fee 
 Only the settlement is subscribed to — the instruction is derived from the source transaction on
 demand, so there is no pairing state to lose across restarts.
 
-Its emitter and receiver are not deployed yet; fill them in
-[routes.ts](src/apps/intent/routes.ts), where the app refuses to start while either is blank.
+Its three addresses live in [routes.ts](src/apps/intent/routes.ts); the app validates them at
+startup and refuses to run on a blank or malformed one.
 
 ## Configuration
 
@@ -53,6 +53,7 @@ caps are constants in each app's `config.ts` and `routes.ts`.
 | `WORMHOLE_API_KEY`    | Wormholescan API key (raises rate limit)          | optional                              |
 | `DISCORD_WEBHOOK_URL` | Low-gas / out-of-gas alerts                       | optional                              |
 | `GAS_WARN_MULTIPLIER` | Warn below this multiple of one submission's cost | `50`                                  |
+| `FROM_SEQ_<CHAIN>`    | Cold-start floor per chain — **see below**        | `0`                                   |
 | `LOG_LEVEL`           | winston level                                     | `info`                                |
 | `APP_NAME`            | Engine namespace override — **see below**         | per-app                               |
 
@@ -104,7 +105,17 @@ rescans — replaying a backlog, or silently skipping everything before the floo
 live one. Do not rename to tidy up.
 
 The `FROM_SEQUENCE` floors only matter on a cold start. Once a `safeSequence` exists the engine reads
-from there, which is why they can sit at `0`.
+from there, which is why they can sit at `0`. Each entry defaults from `FROM_SEQ_<CHAIN>`
+(`FROM_SEQ_HYDRATION`, `FROM_SEQ_SOLANA`, …), so a floor can be set at deploy time — but only before
+a namespace's first run, since nothing reads it afterwards.
+
+Set one when an app subscribes to an emitter that was already busy before the app existed. Otherwise
+the missed-VAA worker walks the whole history, and on chain 73 that walk does not even terminate: the
+guardian gRPC returns `code 13` rather than `code 5` for old Hydration sequences, so
+`tryFetchVaa` throws instead of returning null, the sequences land in `failedToFetch`, and
+`calculateLastSafeSequence` pins `safeSequence` to `failedToFetch[0] - 1` on every 30s cycle
+forever. Wormholescan's REST API serves those same VAAs fine — it is only the engine's internal gRPC
+path, which has no fallback, that fails.
 
 ### Retry budget vs age cap
 
