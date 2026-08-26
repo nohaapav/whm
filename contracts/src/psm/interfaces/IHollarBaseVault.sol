@@ -66,6 +66,7 @@ interface IHollarBaseVault {
     error UsdcBelowFloor(uint256 price, uint256 floorPrice);
     error OracleNotConfigured();
     error NotAtQueueHead(address caller, address head);
+    error CancelNotAtHead(uint256 index, uint256 head);
     error NotYourCredit(uint256 index, address owner);
     error NotQueued(uint256 index);
     error NothingUnpayable(address recipient);

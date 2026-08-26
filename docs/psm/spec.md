@@ -37,7 +37,8 @@ Holds the reserve. Inherits `MessageReceiver` (UUPS + Wormhole verification + re
   for want of liquidity.
 - **`drain(maxEntries)` / `claim()`** — pay the queue head-first. Permissionless (`drain`) so nobody
   depends on us being online.
-- **`cancelQueuedRedemption(index)`** — the redeemer gives up their place and takes the HOLLAR back.
+- **`cancelQueuedRedemption(index)`** — the redeemer at the head gives up their place and takes
+  the HOLLAR back. Head only, so the queue is only ever modified at the front.
 - **`claimUnpayable(recipient)`** — pays out a credit that was retired because its recipient could
   not receive USDC, once that clears.
 
@@ -108,7 +109,9 @@ keep the queue permanently busy and stationary.
 
 **Ordered on the redeem side, unordered on the mint side.** The vault's claim queue is FIFO because
 claims compete for one scarce reserve and arrival order *is* the fairness guarantee — which is what
-creates its head-of-line residual, answered by `cancelQueuedRedemption`. The mint queue rations
+creates its head-of-line residual, answered by `cancelQueuedRedemption`. Both ways out of that
+queue — paid or cancelled — act on the head and nothing else, so no slot behind it is ever
+zeroed and no later caller inherits a walk over one. The mint queue rations
 nothing: no one was promised a place, and bucket headroom returns as HOLLAR is redeemed. Ordering it
 would only mean an entry the bucket cannot cover holds up every smaller one behind it, so entries
 are independent and flushable by id. An unmintable one reverts its own flush and blocks nobody; its
@@ -120,9 +123,10 @@ entry retires into `unpayable` — still owed, still a liability, payable later 
 and the queue advances. Sourcing liquidity from Aave is *not* isolated: if Aave will not release the
 money that reverts and the claim stays queued, because that is a reserve problem, not a recipient one.
 
-**The redeemer can leave.** Whole-fill means a head larger than the reserve can release stalls the
-line, and the burn already happened. `cancelQueuedRedemption` returns `gross` to `principal` and
-re-mints the same figure, so the corridor lands exactly where it stood.
+**The redeemer can leave, from the head.** Whole-fill means a head larger than the reserve can
+release stalls the line, and the burn already happened. `cancelQueuedRedemption` returns `gross` to
+`principal` and re-mints the same figure, so the corridor lands exactly where it stood. It applies
+to the head only — which is where the stall is by definition — and everyone behind leaves in turn.
 
 **A Base reorg is an accepted residual, not a bounded one.** Publishing at 200 means guardians sign
 on inclusion, so a reorg that unwinds a deposit after its VAA is signed leaves that HOLLAR unbacked.
@@ -148,10 +152,13 @@ highest-value key in the system is not a live setting; a wrong value means redep
 
 **No minimum deposit or redemption.** Both were removed as configurable dials. The consequence is
 recorded rather than hidden: dust redemptions are now possible, so the claim queue can be stuffed
-with entries worth nothing. Each still costs the attacker a full Hydration transaction and each is
-settled and skipped permanently by `_advanceHead`, so it is a griefing cost on whoever calls `drain`
-rather than a stall — but the outbound rate limit caps redeemed *value*, not the *count* of
-redemptions, so nothing bounds the entry count directly.
+with entries worth nothing, and the outbound rate limit caps redeemed *value*, not the *count* of
+redemptions — nothing bounds the entry count directly. What bounds the damage is that every entry
+leaves the queue at the head and costs one entry's work to retire, whether it is paid or cancelled.
+So stuffing is a griefing cost, paid one entry at a time by whoever calls `drain`, and `drain`'s
+`maxEntries` lets that caller bound their own spend. It is not a stall, and no caller can be made to
+absorb the whole pile in a single transaction — which is what an unbounded scan over retired slots
+would have meant, given the count is unbounded.
 
 **No per-credit hold, and no way to erase one.** Large credits were once parked for 24 h where an
 admin could void a forged one, restoring `principal` and leaving everyone else paid. That mechanism
@@ -175,7 +182,7 @@ escrowed intent**. This implements a **direct burn**. Recorded rather than argue
 | HOLLAR on redeem | escrowed, burned at fill | burned immediately |
 | Queue location | Hydration, per exit chain | Base, in the vault |
 | Liquidity check | before the message, via an attested report | none |
-| Stuck redeemer | cancel or re-route on an intact escrow | `cancelQueuedRedemption`, one round trip |
+| Stuck redeemer | cancel or re-route on an intact escrow | `cancelQueuedRedemption` at the head, one round trip |
 | Ledger | global from day one (I1) | per corridor |
 
 The spec names head-of-line blocking as an accepted residual precisely because nothing is burned

@@ -210,10 +210,9 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      why the redeemer can walk away from it via `cancelQueuedRedemption`.
     function claim() external {
         if (claimsPaused) revert ClaimsPaused();
-        _advanceHead();
 
-        (bool found, uint256 index) = _liveHead();
-        address head = found ? queue[index].recipient : address(0);
+        uint256 index = queueHead;
+        address head = index < queueTail ? queue[index].recipient : address(0);
         if (head != msg.sender) revert NotAtQueueHead(msg.sender, head);
 
         uint256 entry = queue[index].amount;
@@ -230,13 +229,11 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     function drain(uint256 maxEntries) external returns (uint256 paid) {
         if (claimsPaused) revert ClaimsPaused();
 
-        _advanceHead();
-
         uint256 available = _reserveLiquidity();
 
         for (uint256 i = 0; i < maxEntries; i++) {
-            (bool found, uint256 index) = _liveHead();
-            if (!found) break;
+            uint256 index = queueHead;
+            if (index >= queueTail) break;
 
             uint256 entry = queue[index].amount;
             if (entry > available) break;
@@ -250,24 +247,31 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         }
     }
 
-    /// @notice Give up a queued redemption and take the HOLLAR back instead.
+    /// @notice Give up a queued redemption and take the HOLLAR back instead. Head only.
     /// @dev The exit from a stalled queue. Whole-fill means a head larger than the reserve can
     ///      release holds the line indefinitely, and the burn on Hydration already happened, so
     ///      without this the redeemer has no way back to either asset. Reverses the credit exactly:
     ///      `gross` returns to `principal` and the same figure is re-minted, so the corridor's
     ///      books land where they were before the redemption.
-    /// @param index The queue slot, from the `RedeemCredited` event or `queueIndexOf`.
+    ///
+    ///      Restricted to the head, so this retires the front entry exactly as a payment does. The
+    ///      restriction costs nothing: the stall it exists to escape is at the head by definition,
+    ///      and everyone behind leaves in turn as the head clears.
+    /// @param index The queue slot, from the `RedeemCredited` event or `queueEntryOf` — cancellable
+    ///        only once it is the head, i.e. once `queueEntryOf` reports `position == 0`.
     function cancelQueuedRedemption(uint256 index) external payable returns (uint64 sequence) {
         Credit memory credit = queue[index];
         if (credit.amount == 0) revert NotQueued(index);
         if (credit.recipient != msg.sender) revert NotYourCredit(index, credit.recipient);
+        // Only the head ever moves. Zeroing a slot behind it would leave a hole every later
+        // advance has to walk, and nothing bounds how many an attacker can leave.
+        if (index != queueHead) revert CancelNotAtHead(index, queueHead);
 
         queue[index].amount = 0;
+        queueHead = index + 1;
         owed[msg.sender] -= credit.amount;
         totalOwed -= credit.gross;
         principal += credit.gross;
-
-        _advanceHead();
 
         // Publishes instant like everything else here, which is the residual this route carries:
         // this mints HOLLAR without locking anything new, so a Base reorg that unwound the
@@ -320,8 +324,8 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     /// @notice What a recipient could actually be paid now — bounded by Aave's real liquidity,
     ///         not by our aUSDC balance, and by their position in the queue.
     function claimable(address recipient) external view returns (uint256) {
-        (bool found, uint256 index) = _liveHead();
-        if (!found || queue[index].recipient != recipient) return 0;
+        uint256 index = queueHead;
+        if (index >= queueTail || queue[index].recipient != recipient) return 0;
 
         // Whole-fill: below the entry's full size nothing is payable, so reporting a part would
         // promise a payout `claim` refuses.
@@ -340,22 +344,19 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     }
 
     function queueHeadEntry() external view returns (address recipient, uint256 amount) {
-        (bool found, uint256 index) = _liveHead();
-        if (!found) return (address(0), 0);
+        uint256 index = queueHead;
+        if (index >= queueTail) return (address(0), 0);
         return (queue[index].recipient, queue[index].amount);
     }
 
-    /// @notice A recipient's first live credit: its queue slot, and how many live entries sit
-    ///         ahead of it. One scan, because both callers want the same walk.
-    /// @dev `index` is what `cancelQueuedRedemption` takes. `position` is for display only — it is
-    ///      not a payment date: ordering is guaranteed, but no liquidity is earmarked against any
-    ///      individual claim and timing is not promised.
+    /// @notice A recipient's first credit: its queue slot, and how many entries sit ahead of it.
+    /// @dev `index` is what `cancelQueuedRedemption` takes, and it is cancellable only once it is
+    ///      the head — `position == 0`. `position` is for display only: ordering is guaranteed, but
+    ///      no liquidity is earmarked against any individual claim and timing is not promised.
+    ///      Every slot between head and tail is live, so the walk is the queue's real length.
     function queueEntryOf(address recipient) external view returns (bool found, uint256 index, uint256 position) {
-        uint256 seen;
         for (uint256 i = queueHead; i < queueTail; i++) {
-            if (queue[i].amount == 0) continue;
-            if (queue[i].recipient == recipient) return (true, i, seen);
-            seen++;
+            if (queue[i].recipient == recipient) return (true, i, i - queueHead);
         }
         return (false, 0, 0);
     }
@@ -447,24 +448,6 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         queueTail++;
         owed[recipient] += amount;
         totalOwed += gross;
-    }
-
-    /// @dev Step over entries that are no longer live — paid, retired or cancelled. Each is skipped
-    ///      exactly once and the head stays put afterwards, so a queue full of cancellations does
-    ///      not make every later `claim` re-walk them.
-    function _advanceHead() private {
-        uint256 head = queueHead;
-        while (head < queueTail && queue[head].amount == 0) head++;
-        queueHead = head;
-    }
-
-    /// @dev First entry still owed, scanning past those already paid, retired or cancelled.
-    ///      Read-only — `_advanceHead` is what moves the head.
-    function _liveHead() private view returns (bool found, uint256 index) {
-        for (uint256 i = queueHead; i < queueTail; i++) {
-            if (queue[i].amount != 0) return (true, i);
-        }
-        return (false, 0);
     }
 
     /// @dev A recipient the reserve cannot pay must not hold the line. USDC on Base is
