@@ -2,7 +2,7 @@ import type { MigrationStep } from "./types";
 import { setOwner } from "../../actions/setOwner";
 
 const step: MigrationStep = {
-  name: "005-transfer-ownership@emitter",
+  name: "009-transfer-ownership@emitter",
   description: "Transfer ownership to the Ethereum Technical Committee Safe",
   action: async (ctx) => {
     const required = (k: string) => {

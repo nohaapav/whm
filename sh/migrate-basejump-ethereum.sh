@@ -3,18 +3,19 @@ set -euo pipefail
 
 # Usage: migrate-basejump-ethereum.sh <env> [runner flags...]
 #
-# Run the basejump-ethereum migration — the Ethereum source end of the direct
-# Ethereum -> Hydration corridor (USDC). Deploys and wires BasejumpEmitter only;
-# the Hydration receiver and landing already exist (see basejump-base).
+# Run the basejump-ethereum migration — both ends of the direct Ethereum -> Hydration
+# corridor (USDC). Deploys and wires BasejumpEmitter on Ethereum and this corridor's own
+# BasejumpReceiver on Hydration. The landing is shared and already exists (see basejump-base).
 #
 # Arguments:
 #   <env>   Environment context: prod | fork
 #
 # Required env vars (set in shell or root .env):
 #   PK_ETHEREUM   Ethereum deployer (0x...)
+#   PK_HYDRATION  Hydration deployer (0x...), needs an EVMAccounts.ContractDeployer slot
 #
 # Example:
-#   PK_ETHEREUM=0x... ./sh/migrate-basejump-ethereum.sh prod
+#   PK_ETHEREUM=0x... PK_HYDRATION=0x... ./sh/migrate-basejump-ethereum.sh prod
 
 ENV=${1:?Usage: migrate-basejump-ethereum.sh <env (prod|fork)>}
 shift
@@ -32,10 +33,12 @@ fi
 
 if [ "$ENV" = "fork" ]; then
   PK_ETHEREUM=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+  PK_HYDRATION=$PK_ETHEREUM
 fi
 
 PK_ETHEREUM=${PK_ETHEREUM:?Missing PK_ETHEREUM}
+PK_HYDRATION=${PK_HYDRATION:?Missing PK_HYDRATION}
 
-export PK_ETHEREUM
+export PK_ETHEREUM PK_HYDRATION
 
 "$TSX" "$RUNNER" --migration basejump-ethereum --env "$ENV" "$@"

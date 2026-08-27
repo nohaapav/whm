@@ -195,11 +195,15 @@ Authorize a corridor bridge (the `BasejumpReceiver` — one receiver serves ever
 | `--dest`    | Hydration destination asset (or `USDC_DEST_ASSET` env)          |
 | `--send`    | Submit directly (requires `PK_LANDING` / `PK` / `--pk` = owner) |
 
+`--bridge` is the corridor's own `BasejumpReceiver` — take it from
+`deployments/<context>/<migration>.json`, step `005-deploy-receiver`. It is NOT the retired
+MRL XcmTransactor MDA.
+
 ```bash
 RPC=https://rpc.hydradx.cloud CHAIN_ID=222222 \
 npx tsx scripts/basejump-landing/addRoute.ts \
   --landing 0x70e9b12c3b19cb5f0e59984a5866278ab69df976 \
-  --bridge 0x9fbba2ffe461aa3aa93fb85305191e531e115e14 \
+  --bridge "$BASEJUMP_RECEIVER_HYDRATION" \
   --source 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
   --dest 0x0000000000000000000000000000000100000015
 ```

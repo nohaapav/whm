@@ -61,7 +61,7 @@ async function main() {
   })) as string;
 
   console.log(`Landing:      ${cfg.landing}`);
-  console.log(`Bridge (MDA): ${cfg.bridge}  authorized=${bridgeAuthorized}`);
+  console.log(`Bridge:       ${cfg.bridge}  authorized=${bridgeAuthorized}`);
   console.log(`Source asset: ${cfg.sourceAsset}`);
   console.log(`Dest asset:   ${cfg.destAsset}  current=${currentDest}`);
   console.log();

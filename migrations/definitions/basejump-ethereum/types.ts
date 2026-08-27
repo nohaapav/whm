@@ -7,9 +7,11 @@ import type {
 
 type EvmWallet = ReturnType<typeof wallet.getWallet>;
 
-/** Source end only — the Hydration receiver and landing already exist and are TC-owned. */
+/** Both ends. This corridor deploys its own receiver; only the landing is shared, and it is
+ *  already TC-owned — nothing here deploys or configures it. */
 export interface WalletContext {
   ethereum: EvmWallet;
+  hydration: EvmWallet;
 }
 
 export type MigrationStep = BS<WalletContext>;

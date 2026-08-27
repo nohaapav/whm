@@ -238,26 +238,36 @@ real `parseAndVerifyVM` accepts — the verification path itself is untouched.
 
 ## Adding a corridor
 
-`authorizedEmitters` is keyed by source chain and Hydration has one landing, so one receiver serves
-every corridor. Ethereum → Hydration needs:
+**One receiver per corridor; only the landing is shared.** `authorizedEmitters` is keyed by source
+chain, so a single receiver *could* serve every leg — but a shared one forces each new corridor's
+migration to env-copy that receiver's address in, and turns its go-live switch into a TC call
+carrying a hand-pasted emitter address. Two manual copies on the one call that arms the corridor.
+A corridor that deploys its own receiver wires both ends from `ctx.outputs`, so they cannot
+diverge, and does not depend on any other migration having run.
 
-1. Hydration TC: `receiver.setAuthorizedEmitter(2, pad(<eth emitter>))` and
-   `landing.setDestAsset(<eth USDC>, <hydration asset>)`.
-   `contracts/scripts/basejump-landing/addRoute.ts` prints the calldata for the second call.
-2. A source migration. A new source deployment is required per chain: the Base contract is a
+The cost is a `setAuthorizedBridge` per corridor, so a new corridor **does** add trust surface on
+the pool — and the landing does not scope a bridge to an asset, so each receiver gains authority
+over the whole pool. It is the same audited contract acting only on VAAs from its own authorized
+emitter, so this is one more instance rather than a new kind of trust, but it is not free.
+
+A corridor needs:
+
+1. A migration deploying both ends: the source emitter on the source chain, and this corridor's
+   receiver on Hydration. A new source deployment is required per chain — the Base contract is a
    Base-specific emitter wired to the Base EURC manager.
+2. Hydration TC, on the shared landing: `landing.setAuthorizedBridge(<this receiver>, true)` and
+   `landing.setDestAsset(<source asset>, <hydration asset>)`.
+   `contracts/scripts/basejump-landing/addRoute.ts` prints the calldata for both.
 3. One entry in the relayer's route list — the settlement leg only.
 4. Fund the pool in the destination asset.
 
-No `setAuthorizedBridge`, so a new corridor adds no trust surface on the pool. To wire a second
-corridor before the ownership handover, pause `basejump-base` before step 008 and append the extra
-emitter step — the runner permits appending steps, not editing or reordering.
-
 ### Ethereum → Hydration (USDC) — ready
 
-[`basejump-ethereum`](../../migrations/definitions/basejump-ethereum/) exists: steps 001–004
-mirroring the Base source, plus `005-transfer-ownership@emitter`. No Hydration steps — the receiver
-from `basejump-base` serves this corridor. Run with `pnpm migrate:basejump-ethereum`.
+[`basejump-ethereum`](../../migrations/definitions/basejump-ethereum/) exists and mirrors
+`basejump-base` step for step: 001–004 deploy and wire the Ethereum emitter, 005–008 deploy this
+corridor's receiver on Hydration and hand it to the TC, 009 hands the emitter to the Ethereum TC
+Safe. Step 006 is the go-live switch. Run with `pnpm migrate:basejump-ethereum` — needs
+`PK_ETHEREUM` and `PK_HYDRATION` (the latter must hold an `EVMAccounts.ContractDeployer` slot).
 
 Verified on mainnet: the Ethereum USDC `NttManager` is
 `0x447b2c7485A3d6813F8197E605b10BcCD8dd8398` — `token()` = USDC `0xA0b86991…eB48`, `getMode()` =
@@ -270,7 +280,9 @@ Exercised end to end on an Ethereum fork: 10 USDC in settles 10 gross to the lan
 9.9 net, with `assetFee` 100,000 (0.1 USDC) retained. The settlement logs precede the fast-path
 `LogMessagePublished` in the receipt, which is invariant 2 holding against the real manager.
 
-The pool holds **no asset 21 today** — it is EURC-only. Fund before go-live.
+The pool holds **no asset 21 today** — it is EURC-only. Fund before go-live, and authorize the
+receiver on the landing; until that call lands the corridor stays dark, so the migration is safe to
+run in full first.
 
 ### Arbitrum → Hydration (USDC) — blocked
 
