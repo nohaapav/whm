@@ -1,45 +1,57 @@
 import { HydrationEvents } from "@galacticcouncil/descriptors";
-import { PolkadotClient } from "polkadot-api";
+import { createClient, PolkadotClient } from "polkadot-api";
+import { getWsProvider } from "polkadot-api/ws";
 import { bytesToHex } from "viem";
 
 import log from "../logger";
-import { insertEvent, loadCursor, saveCursor } from "../db";
+import { insertEvents, loadCursor, saveCursor, type RawEvent } from "../db";
 import { BoundedQueue } from "../utils";
 import { liveIntervalMs } from "../config";
-import type { SubstrateChain } from "../types";
+import type { SubstrateChain, Watch } from "../types";
 
 const FINALIZED_STALE_MS = 60_000;
 
 type EvmPayload = HydrationEvents["EVM"]["Log"];
-type IndexedLog = {
+
+interface IndexedLog {
   index: number;
   address: string;
-  topics: string[];
-  data: string;
-};
-type Block = { number: bigint; hash: `0x${string}`; logs: IndexedLog[] };
+  topics: `0x${string}`[];
+  data: `0x${string}`;
+}
+
+type Block = { number: bigint; hash: `0x${string}`; timestamp: number; logs: IndexedLog[] };
 
 /**
- * Backfills + live-tails a substrate chain's EVM.Log events. Finalized blocks arrive over a WSS
- * subscription (`finalizedBlock$`) and drive ingestion directly (the interval is only a backstop);
- * we never poll for the head. Matching logs from any of the watched contract addresses are written
- * to the shared `events` table in block order, checkpointing periodically.
+ * Backfills and live-tails a substrate chain's EVM.Log events. Finalized blocks arrive over a
+ * websocket subscription and drive ingestion directly; the interval is only a backstop.
+ *
+ * Unlike the EVM watcher, blocks are read whole rather than filtered by the node, so one pass serves
+ * every role at the same height. A role added later with an older start block pulls the scan back
+ * for all of them — the reads are shared, and the inserts are idempotent.
  */
 export class SubstrateWatcher {
+  readonly client: PolkadotClient;
   private timer?: NodeJS.Timeout;
   private sub?: { unsubscribe(): void };
   private pendingSafe?: bigint;
   private lastBlockAt = 0;
   private busy = false;
-  private readonly targets: Set<string>;
+  /** Watch entries by emitting address — one address may serve several roles. */
+  private readonly targets = new Map<string, Watch[]>();
 
   constructor(
     public readonly cfg: SubstrateChain,
-    contracts: `0x${string}`[],
-    private readonly client: PolkadotClient,
-    private readonly onIngest?: () => void,
+    private readonly watches: Watch[],
+    private readonly onIngest?: (chain: string) => void,
   ) {
-    this.targets = new Set(contracts.map((a) => a.toLowerCase()));
+    this.client = createClient(getWsProvider(cfg.wssUrl));
+    for (const w of watches) {
+      for (const a of w.at) {
+        const key = a.toLowerCase();
+        this.targets.set(key, [...(this.targets.get(key) ?? []), w]);
+      }
+    }
   }
 
   async latestSafe(): Promise<bigint> {
@@ -62,8 +74,6 @@ export class SubstrateWatcher {
     if (this.timer) clearInterval(this.timer);
     this.client?.destroy();
   }
-
-  // ─── live tail ───────────────────────────────────────────────────
 
   private subscribe(): void {
     this.sub?.unsubscribe();
@@ -103,21 +113,31 @@ export class SubstrateWatcher {
     }
   }
 
-  private async tick(safeHint?: bigint): Promise<void> {
-    const safe = safeHint ?? (await this.latestSafe());
-    const cursor = (await loadCursor(this.cfg.name)) ?? this.cfg.startBlock - 1n;
-    if (safe <= cursor) return;
-    log.info(`[${this.cfg.name}] indexing ${cursor + 1n}..${safe}`);
+  /** Each role's cursor, defaulted to just before its own start block. */
+  private async cursors(): Promise<Map<string, bigint>> {
+    const out = new Map<string, bigint>();
+    for (const w of this.watches) {
+      out.set(w.role, (await loadCursor(this.cfg.name, w.role)) ?? w.from - 1n);
+    }
+    return out;
+  }
 
-    // Two decoupled pipelines: fetcher pulls blocks, processor inserts matching
-    // EVM.Log events into the events table in block order, checkpoints periodically.
+  private async tick(safe: bigint): Promise<void> {
+    const cursors = await this.cursors();
+    const from = [...cursors.values()].reduce((a, b) => (b < a ? b : a));
+    if (safe <= from) return;
+    const backfill = safe - from > BigInt(this.cfg.checkpointEvery);
+    if (backfill) log.info(`[${this.cfg.name}] indexing ${from + 1n}..${safe}`);
+
+    // Two decoupled pipelines: the fetcher pulls blocks concurrently, the writer inserts matching
+    // logs in block order and checkpoints periodically.
     const queue = new BoundedQueue<Block>(this.cfg.concurrency * 2);
     const fetchErr: { e?: Error } = {};
 
     const fetcher = async () => {
       try {
         const inflight: Promise<Block>[] = [];
-        let next = cursor + 1n;
+        let next = from + 1n;
         while (inflight.length < this.cfg.concurrency && next <= safe) {
           inflight.push(this.fetchBlock(next++));
         }
@@ -133,33 +153,31 @@ export class SubstrateWatcher {
       }
     };
 
-    const processor = async () => {
+    const writer = async () => {
       let ingested = 0;
       let processed = 0;
-      let lastCheckpoint = cursor;
+      let lastCheckpoint = from;
       const start = Date.now();
       for (let block = await queue.take(); block; block = await queue.take()) {
-        let blockIngested = 0;
-        for (const l of block.logs) {
-          const txHash = `${block.hash}-${l.index}`;
-          const ok = await insertEvent(
-            this.cfg.name,
-            txHash,
-            l.index,
-            l.address,
-            block.number,
-            l.topics,
-            l.data,
-          );
-          if (ok) {
-            ingested++;
-            blockIngested++;
-          }
-        }
-        if (blockIngested > 0) this.onIngest?.();
+        const events: RawEvent[] = block.logs
+          .filter((l) => this.wanted(l, block.number, cursors))
+          .map((l) => ({
+            // An EVM.Log is a substrate event, not an EVM transaction, so there is no tx hash to
+            // key on — the block hash plus the event index is the stable identity.
+            txHash: `${block.hash}-${l.index}`,
+            logIndex: l.index,
+            address: l.address,
+            blockNumber: block.number,
+            blockTimestamp: block.timestamp,
+            topics: l.topics,
+            data: l.data,
+          }));
+        const n = await insertEvents(this.cfg.name, events);
+        if (n > 0) this.onIngest?.(this.cfg.name);
+        ingested += n;
         processed++;
         if (block.number - lastCheckpoint >= BigInt(this.cfg.checkpointEvery)) {
-          await saveCursor(this.cfg.name, block.number);
+          await this.checkpoint(block.number, cursors);
           const bps = Math.round(processed / ((Date.now() - start) / 1000));
           log.info(
             `[${this.cfg.name}] at ${block.number} (${processed} blocks, ${ingested} events, ${bps} blk/s)`,
@@ -168,28 +186,47 @@ export class SubstrateWatcher {
         }
       }
       if (fetchErr.e) throw fetchErr.e;
-      await saveCursor(this.cfg.name, safe);
-      log.info(`[${this.cfg.name}] ingested ${ingested} events in ${processed} blocks, at ${safe}`);
+      await this.checkpoint(safe, cursors);
+      if (backfill || ingested > 0) {
+        log.info(`[${this.cfg.name}] ingested ${ingested} events in ${processed} blocks, at ${safe}`);
+      }
     };
 
-    await Promise.all([fetcher(), processor()]);
+    await Promise.all([fetcher(), writer()]);
+  }
+
+  /** Advance every role that has actually been covered up to `block`. */
+  private async checkpoint(block: bigint, cursors: Map<string, bigint>): Promise<void> {
+    for (const w of this.watches) {
+      const at = cursors.get(w.role)!;
+      if (block <= at) continue;
+      await saveCursor(this.cfg.name, w.role, block);
+      cursors.set(w.role, block);
+    }
+  }
+
+  /** Whether a log belongs to a watch that has not already covered this block. */
+  private wanted(l: IndexedLog, block: bigint, cursors: Map<string, bigint>): boolean {
+    const matches = this.targets.get(l.address) ?? [];
+    return matches.some((w) => cursors.get(w.role)! < block && topicsMatch(w, l.topics));
   }
 
   private async fetchBlock(n: bigint): Promise<Block> {
     const hash = await this.client._request<string>("chain_getBlockHash", [Number(n)]);
     if (!hash) throw new Error(`block #${n}: no hash`);
-    const records = await this.client.getUnsafeApi().query.System.Events.getValue({ at: hash });
-    return {
-      number: n,
-      hash: hash as `0x${string}`,
-      logs: this.extractEvmLogs(records as unknown as RawRecord[]),
-    };
+    const at = hash as `0x${string}`;
+    const records = await this.client.getUnsafeApi().query.System.Events.getValue({ at });
+    const logs = this.extractEvmLogs(records as unknown as RawRecord[]);
+    // Only blocks that produced something we index are worth a timestamp read.
+    const timestamp = logs.length
+      ? Number(await this.client.getUnsafeApi().query.Timestamp.Now.getValue({ at }))
+      : 0;
+    return { number: n, hash: at, timestamp, logs };
   }
 
   /**
-   * Pull EVM.Log events emitted by any watched contract, tagging each with its address.
-   * In the current descriptors, `address`/`topics` are already hex strings (SizedHex) and
-   * `data` is a Uint8Array.
+   * Pull EVM.Log events emitted by any watched contract, tagging each with its address. In the
+   * current descriptors `address`/`topics` are already hex strings and `data` is a Uint8Array.
    */
   private extractEvmLogs(records: RawRecord[]): IndexedLog[] {
     const out: IndexedLog[] = [];
@@ -197,17 +234,36 @@ export class SubstrateWatcher {
       const evt = records[i].event;
       if (evt.type !== "EVM" || evt.value.type !== "Log") continue;
       const { log } = evt.value.value as EvmPayload;
-      const addr = (log.address as string).toLowerCase();
-      if (!this.targets.has(addr)) continue;
+      const address = (log.address as string).toLowerCase();
+      if (!this.targets.has(address)) continue;
       out.push({
         index: i,
-        address: addr,
-        topics: log.topics.map((t) => t as string),
+        address,
+        topics: log.topics.map((t) => t as `0x${string}`),
         data: bytesToHex(log.data),
       });
     }
     return out;
   }
+}
+
+/**
+ * Apply a watch's positional topic filter. The node does this for EVM chains; here it is ours to
+ * do, and it is what keeps a shared emitter like the Wormhole core down to our own senders.
+ *
+ * @param w The watch entry.
+ * @param topics The log's topics.
+ */
+function topicsMatch(w: Watch, topics: `0x${string}`[]): boolean {
+  if (!w.topics) return true;
+  return w.topics.every((want, i) => {
+    if (want === null || want === undefined) return true;
+    const got = topics[i]?.toLowerCase();
+    if (!got) return false;
+    return Array.isArray(want)
+      ? want.some((x) => x.toLowerCase() === got)
+      : want.toLowerCase() === got;
+  });
 }
 
 type RawRecord = {

@@ -1,0 +1,33 @@
+import { parseAbiItem } from "viem";
+
+/**
+ * Wormhole and NTT event shapes. Infrastructure, not a feature — every corridor in this repo
+ * publishes through the same core and settles through the same manager.
+ */
+
+/** Wormhole core. The `sender` topic is what narrows the core down to emitters we own. */
+export const LogMessagePublishedEvt = parseAbiItem(
+  "event LogMessagePublished(address indexed sender, uint64 sequence, uint32 nonce, bytes payload, uint8 consistencyLevel)",
+);
+
+/**
+ * NTT Wormhole transceiver, destination side — the VAA was verified and consumed.
+ *
+ * Its first field is named `digest` but holds the VAA hash, which is not the digest the manager's
+ * delivery events carry. Kept faithful to the deployed ABI regardless; renaming it here would only
+ * make the log disagree with the chain.
+ */
+export const ReceivedMessageEvt = parseAbiItem(
+  "event ReceivedMessage(bytes32 digest, uint16 emitterChainId, bytes32 emitterAddress, uint64 sequence)",
+);
+
+/** NTT manager, destination side — the transfer released to its recipient. */
+export const TransferRedeemedEvt = parseAbiItem("event TransferRedeemed(bytes32 indexed digest)");
+
+/**
+ * NTT manager, destination side — the inbound rate limiter is holding the transfer. Delivered but
+ * crediting nothing, which is the state a stuck corridor sits in.
+ */
+export const InboundTransferQueuedEvt = parseAbiItem(
+  "event InboundTransferQueued(bytes32 digest)",
+);

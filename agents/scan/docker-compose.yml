@@ -1,27 +1,14 @@
 version: "3.3"
 services:
-  scan:
-    image: galacticcouncil/whmscan:latest
+  app-intents:
+    image: galacticcouncil/scan:latest
+    command: [node, intents/app.js]
     environment:
-      # Base
-      - BASE_RPC_URL=
-      - BASE_START_BLOCK=44386800
-      # Ethereum
-      - ETHEREUM_RPC_URL=
-      - ETHEREUM_START_BLOCK=25300000
-      # Moonbeam
-      - MOONBEAM_RPC_URL=
-      - MOONBEAM_START_BLOCK=15752000
-      # Hydration
-      - HYDRATION_WSS_URL=
-      - HYDRATION_START_BLOCK=12011000
-      # Contract addresses (no code fallbacks — set them here). Comma-separated lists.
-      - BASEJUMP_BASE=0xf5b9334e44f800382cb47fc19669401d694e529b
-      - BASEJUMP_LANDING_HYDRATION=0x70e9b12c3b19cb5f0e59984a5866278ab69df976
-      - INTENT_EMITTER_HYDRATION=0x059ed5658c988976e73adb6597418970414f3dd0
-      - INTENT_RECEIVER_ETHEREUM=0xf1a5fe4252d9a1c39b0fb9de1f19049ee57ed188
-      #
       - DATABASE_URL=postgres://scan:scan@postgres:5432/scan
+      # Asset symbols are read from Hydration once at boot; nothing else here touches a chain.
+      - RPC_HYDRATION_WSS=
+      # The off-chain leg. Without it an order stops at `processed` and never resolves.
+      - ONECLICK_JWT=
     ports:
       - "8080:8080"
     depends_on:
@@ -33,6 +20,49 @@ services:
     deploy:
       labels:
         swarmpit.service.deployment.autoredeploy: "true"
+
+  app-basejump:
+    image: galacticcouncil/scan:latest
+    command: [node, basejump/app.js]
+    environment:
+      - DATABASE_URL=postgres://scan:scan@postgres:5432/scan
+    ports:
+      - "8081:8080"
+    depends_on:
+      - postgres
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: "true"
+
+  # One image, one service per domain. The command names the entry point — nothing is selected at
+  # runtime. Only ingest writes to `events`, `wh_messages` and `ntt_transfers`; the rest read them.
+  #
+  # What to index — chain ids, contract addresses, start blocks — is code, in src/chains.ts and
+  # src/watch.ts. Only endpoints and secrets are set here.
+  ingest:
+    image: galacticcouncil/scan:latest
+    command: [node, ingest/app.js]
+    environment:
+      # EVM RPCs must be websocket: heads arrive over eth_subscribe, never by polling.
+      - RPC_ETHEREUM_WSS=
+      # Hydration MUST be the substrate path — the landing's deliveries are XCM-driven pallet_evm
+      # calls with no eth receipt, so only Frontier EVM.Log substrate events expose them.
+      - RPC_HYDRATION_WSS=
+      - DATABASE_URL=postgres://scan:scan@postgres:5432/scan
+    depends_on:
+      - postgres
+    networks:
+      - default
+    logging:
+      driver: json-file
+    deploy:
+      labels:
+        swarmpit.service.deployment.autoredeploy: "true"
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -43,9 +73,13 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - default
+    logging:
+      driver: json-file
+
 networks:
   default:
     driver: overlay
+
 volumes:
   pgdata:
     driver: local

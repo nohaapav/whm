@@ -1,0 +1,462 @@
+/*
+ * Shared across every domain's pages. Tokens, type scale and layout primitives are lifted from the
+ * Hydration explorer so the two read as one product; Geist comes from Google Fonts rather than the
+ * explorer's own host, so nothing here depends on it staying up.
+ */
+
+:root[data-theme="dark"] {
+  --bg: #030816;
+  --bg-elev: #0d1525;
+  --bg-elev2: #131d30;
+  --panel: #ffffff08;
+  --panel-hover: #ffffff0f;
+  --border: #ffffff17;
+  --separator: #ffffff0e;
+  --text-high: #f5f1f8;
+  --text-medium: #a4abbd;
+  --text-low: #6a7187;
+  --text-lowest: #454c5e;
+  --accent: #e53e76;
+  --accent-soft: #e53e7624;
+  --lavender: #dfb1f3;
+  --lavender-soft: #cc6ef426;
+  --sky: #95caff;
+  --sky-soft: #53a4f321;
+  --green: #74c742;
+  --green-soft: #74c74226;
+  --red: #ff6868;
+  --red-soft: #ff686821;
+  --amber: #f7bf06;
+  --amber-soft: #f7bf0621;
+  --orange: #ff8a45;
+  --orange-soft: #ff8a4524;
+  --neutral: #9aa3b5;
+}
+
+:root[data-theme="light"] {
+  --bg: #efedea;
+  --bg-elev: #fff;
+  --bg-elev2: #f6f4f1;
+  --panel: #240e3209;
+  --panel-hover: #240e3212;
+  --border: #240e3221;
+  --separator: #240e3214;
+  --text-high: #232226;
+  --text-medium: #5f5b67;
+  --text-low: #8a8693;
+  --text-lowest: #bdb8c6;
+  --accent: #e53e76;
+  --accent-soft: #e53e761a;
+  --lavender: #b454da;
+  --lavender-soft: #cc6ef429;
+  --sky: #2c89e9;
+  --sky-soft: #53a4f31a;
+  --green: #45ac1f;
+  --green-soft: #74c74229;
+  --red: #d83b3b;
+  --red-soft: #d83b3b1a;
+  --amber: #b58800;
+  --amber-soft: #f7bf0629;
+  --orange: #a04508;
+  --orange-soft: #a045081f;
+  --neutral: #5f5b67;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text-high);
+  font-family: Geist, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.mono,
+code,
+td.mono,
+.addr,
+.num {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+a {
+  color: var(--sky);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ─── Frame ─────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border-bottom: 1px solid var(--separator);
+}
+
+.topbar .brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.logo {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+  flex: none;
+}
+
+.topbar .brand .domain {
+  color: var(--text-low);
+  font-weight: 400;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: 0.75rem;
+}
+
+.topbar nav a {
+  padding: 0.25rem 0.6rem;
+  border-radius: 9999px;
+  color: var(--text-medium);
+  font-size: 13px;
+}
+
+.topbar nav a:hover {
+  background: var(--panel-hover);
+  text-decoration: none;
+}
+
+.topbar nav a[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.spacer {
+  margin-left: auto;
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-lowest);
+  font-size: 12px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-lowest);
+}
+
+.dot.live {
+  background: var(--green);
+}
+
+.theme {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-medium);
+  border-radius: 9999px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.theme:hover {
+  background: var(--panel-hover);
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem 4rem;
+}
+
+/* ─── Panels ────────────────────────────────────────────────── */
+
+.panel {
+  background: var(--bg-elev);
+  border: 1px solid var(--separator);
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.panel + .panel {
+  margin-top: 1rem;
+}
+
+.panel > header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--separator);
+  font-size: 13px;
+  color: var(--text-medium);
+}
+
+.panel > header h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-high);
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.stat {
+  flex: 1 1 8rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--separator);
+  border-radius: 14px;
+}
+
+.stat .k {
+  color: var(--text-low);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stat .v {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+/* ─── Tables ────────────────────────────────────────────────── */
+
+.scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th {
+  padding: 0.55rem 1.1rem;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-low);
+  border-bottom: 1px solid var(--separator);
+  white-space: nowrap;
+}
+
+td {
+  padding: 0.65rem 1.1rem;
+  border-bottom: 1px solid var(--separator);
+  white-space: nowrap;
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr:hover {
+  background: var(--panel);
+}
+
+td.num {
+  text-align: right;
+}
+
+.empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--text-medium);
+  font-size: 12px;
+}
+
+/* ─── Detail rows ───────────────────────────────────────────── */
+
+dl {
+  margin: 0;
+  padding: 0.4rem 0;
+}
+
+dl div {
+  display: flex;
+  gap: 1rem;
+  padding: 0.45rem 1.1rem;
+  align-items: baseline;
+}
+
+dl dt {
+  flex: 0 0 11rem;
+  color: var(--text-low);
+  font-size: 12px;
+}
+
+dl dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ─── Badges ────────────────────────────────────────────────── */
+
+.badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 9999px;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  background: var(--panel);
+  color: var(--text-medium);
+}
+
+/* Lifecycle colouring, shared by every flow: in-flight is cool, done is green, held is amber. */
+.badge.placed,
+.badge.initiated,
+.badge.published {
+  background: var(--sky-soft);
+  color: var(--sky);
+}
+
+.badge.processed,
+.badge.received,
+.badge.completed {
+  background: var(--lavender-soft);
+  color: var(--lavender);
+}
+
+.badge.settled,
+.badge.redeemed,
+.badge.fulfilled {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.badge.queued {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.badge.refunded {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.badge.failed {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+/* ─── Controls ──────────────────────────────────────────────── */
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+input[type="search"],
+select {
+  padding: 0.4rem 0.7rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  color: var(--text-high);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+input[type="search"] {
+  min-width: 22rem;
+  max-width: 100%;
+  font-family: "Geist Mono", ui-monospace, monospace;
+}
+
+input[type="search"]:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button.page {
+  padding: 0.35rem 0.8rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  color: var(--text-medium);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button.page:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.page:not(:disabled):hover {
+  background: var(--panel-hover);
+}
+
+.muted {
+  color: var(--text-low);
+}
+
+.dim {
+  color: var(--text-lowest);
+}
+
+@media (max-width: 720px) {
+  dl div {
+    display: block;
+  }
+  dl dt {
+    margin-bottom: 0.15rem;
+  }
+  input[type="search"] {
+    min-width: 0;
+    width: 100%;
+  }
+}

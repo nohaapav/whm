@@ -1,5 +1,4 @@
 import type { AbiEvent, Chain as ViemChain } from "viem";
-import type { FastifyInstance } from "fastify";
 
 // ─── Chains ──────────────────────────────────────────────────────
 
@@ -8,7 +7,9 @@ export type ChainKind = "evm" | "substrate";
 interface ChainBase {
   name: string;
   kind: ChainKind;
-  startBlock: bigint;
+  /** Wormhole chain id — the first component of a VAA id. */
+  wormholeId: number;
+  /** Blocks behind the head that ingest treats as final. */
   confirmations: bigint;
   concurrency: number;
 }
@@ -16,6 +17,7 @@ interface ChainBase {
 export interface EvmChain extends ChainBase {
   kind: "evm";
   chain: ViemChain;
+  /** Websocket — new heads arrive over eth_subscribe, never by polling. */
   rpcUrl: string;
   chunkSize: bigint;
 }
@@ -24,64 +26,108 @@ export interface SubstrateChain extends ChainBase {
   kind: "substrate";
   chainId: number;
   wssUrl: string;
+  /** Blocks between cursor writes during a backfill. */
   checkpointEvery: number;
 }
 
 export type ChainCfg = EvmChain | SubstrateChain;
 
+// ─── Ingest ──────────────────────────────────────────────────────
+
+/**
+ * One contract set to index, and the unit a cursor is kept for. Adding an entry backfills only that
+ * entry from its own `from` — nothing else on the chain moves.
+ */
+export interface Watch {
+  chain: string;
+  /** Stable name a flow addresses this contract set by; never an address. */
+  role: string;
+  from: bigint;
+  at: `0x${string}`[];
+  /** Positional topic filter. An array in a slot is an OR; a null matches anything. */
+  topics?: (`0x${string}` | `0x${string}`[] | null)[];
+  /**
+   * Resolve who sent the transaction, for events that do not say. Costs a receipt lookup per
+   * matched transaction, so it is opt-in rather than the default. EVM only — a substrate EVM.Log
+   * has no EVM origin to read.
+   */
+  sender?: boolean;
+}
+
 // ─── Events ──────────────────────────────────────────────────────
 
-export interface LogRef {
+/** Where an event happened. Stored as JSONB on the row a leg writes. */
+export interface EventRef {
   chain: string;
   blockNumber: string;
-  txHash: `0x${string}`;
+  /** Unix ms, written at ingest — a feature never asks a node for it. */
+  blockTimestamp: number;
+  txHash: string;
   logIndex: number;
 }
 
-export interface EventRef extends LogRef {
-  blockTimestamp: number;
-}
-
-export interface LogEvent {
+/** A decoded log, handed to a leg. */
+export interface LogEvent<A = Record<string, unknown>> {
   chain: string;
+  role: string;
   address: string;
-  ref: LogRef;
+  ref: EventRef;
+  /** Who sent the transaction — only where the watch entry asked ingest to resolve it. */
+  sender?: string;
   eventName: string;
-  args: Record<string, unknown>;
+  args: A;
 }
 
-/** Decodes + handles one event signature emitted by a watched contract. */
-export interface EventHandler {
+// ─── Flows ───────────────────────────────────────────────────────
+
+/**
+ * One event a flow observes.
+ *
+ * `key` returns the row this event belongs to, or null to drop it — shared infrastructure emits
+ * plenty that isn't ours. It may be async and is handed the drain's transaction, because not every
+ * event names its own record: a delivery that carries no sequence has to be matched against what is
+ * already stored, and that match has to see the same rows the rest of the batch is writing.
+ *
+ * `keyBy` names the column that key addresses, defaulting to the flow's primary key; a leg keying
+ * on an alternate unique column can only land after the leg that bound that column, which within a
+ * transaction log order guarantees.
+ */
+export interface Leg<A = any> {
+  role: string;
   abi: AbiEvent;
-  handle: (ev: LogEvent) => Promise<void> | void;
+  state: string;
+  keyBy?: string;
+  key: (args: A, ev: LogEvent<A>, db: Queryable) => string | null | Promise<string | null>;
+  patch: (args: A, ev: LogEvent<A>) => Record<string, unknown>;
 }
 
-// ─── Features ────────────────────────────────────────────────────
-
-/** A contract watched on a named chain, plus the handlers for its events. */
-export interface FeatureContract {
-  /** chain name — must be present in the enabled chain registry */
-  chain: string;
-  address: `0x${string}`;
-  /** optional getLogs topic filter (EVM only) — narrows a firehose emitter (e.g. Wormhole core → one sender) */
-  topics?: (`0x${string}` | null)[];
-  events: EventHandler[];
+/** The subset of a pg client a leg may use — enough to read, never enough to manage a transaction. */
+export interface Queryable {
+  query(sql: string, values?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
 }
 
 /**
- * A feature owns its decoding, its storage, its API surface, and its status counts.
- * The generic harness (chains → events → processor) routes decoded events to the
- * feature's handlers and otherwise knows nothing feature-specific.
+ * A table, the events that fill it, and how far a row has got.
+ *
+ * Legs sharing a key are the same record — that is the whole of what "belongs together" means here.
+ * State advances by rank and never regresses, so legs may arrive in any order; equal ranks are
+ * alternative outcomes rather than a sequence.
  */
-export interface Feature {
+export interface Flow {
   name: string;
-  contracts: FeatureContract[];
-  /** create the feature's own tables (idempotent) */
-  initSchema(): Promise<void>;
-  /** register the feature's HTTP routes (convention: /api/<name>/*) */
-  routes(app: FastifyInstance): void;
-  /** per-state record counts for /api/status */
-  counts(): Promise<Record<string, number>>;
-  /** optional background worker, started after watchers (e.g. the intents settlement poller) */
-  start?(): void;
+  table: string;
+  key: { column: string; type: string };
+  /** Alternate unique columns a leg may address the row by. */
+  unique?: string[];
+  states: Record<string, number>;
+  /**
+   * Ref column to the ref column it presupposes. A row carrying a leg whose prerequisite is missing
+   * — a delivery whose origin was never indexed — is an orphan, hidden from lists and counts rather
+   * than shown half-built. Two refs may name the same prerequisite where a lifecycle branches.
+   * Omit where every row stands on its own.
+   */
+  requires?: Record<string, string>;
+  columns: Record<string, string>;
+  legs: Leg[];
+  indexes?: string[];
 }

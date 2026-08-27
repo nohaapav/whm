@@ -1,19 +1,14 @@
-import { type PublicClient, type WebSocketTransport } from "viem";
+import { createPublicClient, webSocket, type PublicClient, type WebSocketTransport } from "viem";
 import { watchBlockNumber } from "viem/actions";
 
 import log from "../logger";
-import { insertEvent, loadCursor, saveCursor } from "../db";
+import { insertEvents, loadCursor, saveCursor, type RawEvent } from "../db";
 import { BoundedQueue } from "../utils";
 import { liveIntervalMs } from "../config";
-import type { EvmChain } from "../types";
+import type { EvmChain, Watch } from "../types";
 
 const HEAD_STALE_MS = 60_000;
-
-/** A contract address to fetch logs for, with an optional topic filter to narrow a firehose emitter. */
-export interface WatchedAddress {
-  address: `0x${string}`;
-  topics?: (`0x${string}` | null)[];
-}
+const TIME_CACHE_MAX = 20_000;
 
 interface RawLog {
   address: `0x${string}`;
@@ -27,25 +22,35 @@ interface RawLog {
 type Chunk = { endBlock: bigint; logs: RawLog[] };
 
 /**
- * Backfills + live-tails an EVM chain. New heads arrive over a WSS `eth_subscribe`
- * (`watchBlockNumber({ poll: false })`) and update the cached `tip`; ingestion runs off that
- * cached tip on a backstop interval, so we never poll the node for the block number. Logs are
- * fetched per watched contract (each may carry its own topic filter) and written to the shared
- * `events` table in cursor order, checkpointing per chunk.
+ * Backfills and live-tails an EVM chain. New heads arrive over a websocket subscription and update
+ * a cached tip; ingestion runs off that tip on a backstop interval, so the node is never polled for
+ * a block number.
+ *
+ * Each watch entry is indexed independently against its own cursor. That is what lets a contract be
+ * added later and backfilled from its own deploy block while everything else stays at the tip.
  */
 export class EvmWatcher {
+  readonly client: PublicClient;
   private timer?: NodeJS.Timeout;
   private unwatch?: () => void;
   private tip?: bigint;
   private lastHeadAt = 0;
   private busy = false;
+  private times = new Map<bigint, number>();
 
   constructor(
     public readonly cfg: EvmChain,
-    private readonly contracts: WatchedAddress[],
-    private readonly client: PublicClient,
-    private readonly onIngest?: () => void,
-  ) {}
+    private readonly watches: Watch[],
+    private readonly onIngest?: (chain: string) => void,
+  ) {
+    this.client = createPublicClient({
+      chain: cfg.chain,
+      transport: webSocket(cfg.rpcUrl, {
+        keepAlive: { interval: 30_000 },
+        reconnect: { attempts: Infinity, delay: 2_000 },
+      }),
+    });
+  }
 
   async latestSafe(): Promise<bigint> {
     const tip = await this.client.getBlockNumber();
@@ -89,7 +94,9 @@ export class EvmWatcher {
         !stale && this.tip !== undefined && this.tip > this.cfg.confirmations
           ? this.tip - this.cfg.confirmations
           : await this.latestSafe();
-      await this.tick(safe);
+      // Sequential across roles: each already fans out internally, and normally every role is at
+      // the tip so this is one small range each.
+      for (const w of this.watches) await this.tick(w, safe);
       if (stale) {
         log.warn(`[${this.cfg.name}] heads stale, re-subscribing`);
         this.watch();
@@ -101,14 +108,14 @@ export class EvmWatcher {
     }
   }
 
-  private async tick(safeHint?: bigint): Promise<void> {
-    const safe = safeHint ?? (await this.latestSafe());
-    const cursor = (await loadCursor(this.cfg.name)) ?? this.cfg.startBlock - 1n;
+  private async tick(w: Watch, safe: bigint): Promise<void> {
+    const cursor = (await loadCursor(this.cfg.name, w.role)) ?? w.from - 1n;
     if (safe <= cursor) return;
-    log.info(`[${this.cfg.name}] indexing ${cursor + 1n}..${safe}`);
+    const backfill = safe - cursor > this.cfg.chunkSize;
+    if (backfill) log.info(`[${this.cfg.name}/${w.role}] indexing ${cursor + 1n}..${safe}`);
 
-    // Two decoupled pipelines: fetcher pulls chunks of logs, processor inserts them
-    // into the events table in cursor order, checkpointing per chunk.
+    // Two decoupled pipelines: the fetcher pulls chunks of logs concurrently, the writer inserts
+    // them in cursor order and checkpoints per chunk.
     const queue = new BoundedQueue<Chunk>(this.cfg.concurrency * 2);
     const fetchErr: { e?: Error } = {};
 
@@ -122,7 +129,7 @@ export class EvmWatcher {
           const end = next + this.cfg.chunkSize - 1n > safe ? safe : next + this.cfg.chunkSize - 1n;
           const from = next;
           next = end + 1n;
-          inflight.push(this.fetchChunk(from, end));
+          inflight.push(this.fetchChunk(w, from, end));
         };
 
         while (inflight.length < this.cfg.concurrency && next <= safe) kickoff();
@@ -138,60 +145,118 @@ export class EvmWatcher {
       }
     };
 
-    const processor = async () => {
+    const writer = async () => {
       let ingested = 0;
-      let processedBlocks = 0;
       const start = Date.now();
-      const total = safe - cursor;
       for (let chunk = await queue.take(); chunk; chunk = await queue.take()) {
-        let chunkIngested = 0;
-        for (const l of chunk.logs) {
-          const ok = await insertEvent(
-            this.cfg.name,
-            l.transactionHash,
-            Number(BigInt(l.logIndex)),
-            l.address,
-            BigInt(l.blockNumber),
-            l.topics,
-            l.data,
-          );
-          if (ok) {
-            ingested++;
-            chunkIngested++;
-          }
-        }
-        await saveCursor(this.cfg.name, chunk.endBlock);
-        if (chunkIngested > 0) this.onIngest?.();
-        processedBlocks = Number(chunk.endBlock - cursor);
-        if (processedBlocks < Number(total)) {
-          const bps = Math.round(processedBlocks / ((Date.now() - start) / 1000));
+        const n = await this.write(w, chunk.logs);
+        await saveCursor(this.cfg.name, w.role, chunk.endBlock);
+        if (n > 0) this.onIngest?.(this.cfg.name);
+        ingested += n;
+        if (backfill && chunk.endBlock < safe) {
+          const done = Number(chunk.endBlock - cursor);
+          const bps = Math.round(done / ((Date.now() - start) / 1000));
           log.info(
-            `[${this.cfg.name}] at ${chunk.endBlock} (${processedBlocks} blocks, ${ingested} events, ${bps} blk/s)`,
+            `[${this.cfg.name}/${w.role}] at ${chunk.endBlock} (${done} blocks, ${ingested} events, ${bps} blk/s)`,
           );
         }
       }
       if (fetchErr.e) throw fetchErr.e;
-      log.info(
-        `[${this.cfg.name}] ingested ${ingested} events in ${processedBlocks} blocks, at ${safe}`,
-      );
+      if (backfill || ingested > 0) {
+        log.info(`[${this.cfg.name}/${w.role}] ingested ${ingested} events, at ${safe}`);
+      }
     };
 
-    await Promise.all([fetcher(), processor()]);
+    await Promise.all([fetcher(), writer()]);
   }
 
-  /** Fetch every watched contract's logs for a block range, each with its own topic filter. */
-  private async fetchChunk(from: bigint, to: bigint): Promise<Chunk> {
-    const fromBlock = `0x${from.toString(16)}` as const;
-    const toBlock = `0x${to.toString(16)}` as const;
-    const perContract = await Promise.all(
-      this.contracts.map(
-        (c) =>
-          this.client.request({
-            method: "eth_getLogs",
-            params: [{ address: c.address, topics: c.topics ?? [], fromBlock, toBlock }],
-          }) as Promise<RawLog[]>,
-      ),
-    );
-    return { endBlock: to, logs: perContract.flat() };
+  /** Attach block timestamps, and senders where the watch asks for them, then store the batch. */
+  private async write(w: Watch, logs: RawLog[]): Promise<number> {
+    if (logs.length === 0) return 0;
+    const [times, senders] = await Promise.all([
+      this.blockTimes(logs.map((l) => BigInt(l.blockNumber))),
+      w.sender ? this.senders(logs.map((l) => l.transactionHash)) : undefined,
+    ]);
+    const events: RawEvent[] = logs.map((l) => ({
+      txHash: l.transactionHash,
+      logIndex: Number(BigInt(l.logIndex)),
+      address: l.address,
+      blockNumber: BigInt(l.blockNumber),
+      blockTimestamp: times.get(BigInt(l.blockNumber)) ?? 0,
+      topics: l.topics,
+      data: l.data,
+      sender: senders?.get(l.transactionHash),
+    }));
+    return insertEvents(this.cfg.name, events);
+  }
+
+  /**
+   * Who sent each transaction. Only for watches that ask, and only for transactions that already
+   * produced a log we index, so this never walks a chain.
+   *
+   * @param hashes Transaction hashes, with duplicates.
+   */
+  private async senders(hashes: `0x${string}`[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const uniq = [...new Set(hashes)];
+    for (let i = 0; i < uniq.length; i += this.cfg.concurrency) {
+      const slice = uniq.slice(i, i + this.cfg.concurrency);
+      const txs = await Promise.all(
+        slice.map(
+          (h) =>
+            this.client.request({
+              method: "eth_getTransactionByHash",
+              params: [h],
+            }) as Promise<{ from: string } | null>,
+        ),
+      );
+      txs.forEach((tx, j) => {
+        if (tx) out.set(slice[j], tx.from.toLowerCase());
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Block timestamps in unix ms, fetched once per block and cached. Only blocks that produced a log
+   * are ever asked for, so this is a fraction of the range.
+   *
+   * @param numbers Block numbers, with duplicates.
+   */
+  private async blockTimes(numbers: bigint[]): Promise<Map<bigint, number>> {
+    const missing = [...new Set(numbers)].filter((n) => !this.times.has(n));
+    for (let i = 0; i < missing.length; i += this.cfg.concurrency) {
+      const slice = missing.slice(i, i + this.cfg.concurrency);
+      const blocks = await Promise.all(
+        slice.map(
+          (n) =>
+            this.client.request({
+              method: "eth_getBlockByNumber",
+              params: [`0x${n.toString(16)}`, false],
+            }) as Promise<{ timestamp: `0x${string}` } | null>,
+        ),
+      );
+      blocks.forEach((b, j) => {
+        if (b) this.times.set(slice[j], Number(BigInt(b.timestamp)) * 1000);
+      });
+    }
+    if (this.times.size > TIME_CACHE_MAX) this.times.clear();
+    return this.times;
+  }
+
+  /** One getLogs for the watch's addresses, carrying its own topic filter. */
+  private async fetchChunk(w: Watch, from: bigint, to: bigint): Promise<Chunk> {
+    const logs = (await this.client.request({
+      method: "eth_getLogs",
+      params: [
+        {
+          address: w.at,
+          topics: w.topics ?? [],
+          fromBlock: `0x${from.toString(16)}`,
+          toBlock: `0x${to.toString(16)}`,
+        },
+      ],
+    })) as RawLog[];
+    return { endBlock: to, logs };
   }
 }

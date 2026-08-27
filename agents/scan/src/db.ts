@@ -6,32 +6,60 @@ import { databaseUrl } from "./config";
 export const pool = new pg.Pool({ connectionString: databaseUrl });
 
 /**
- * Core schema shared by every feature: a per-chain ingestion `cursors` table and a raw
- * `events` log. Features add their own tables via their `initSchema()`. `address` is the
- * emitting contract — the processor routes on (chain, address, topic0).
+ * Core schema, owned by ingest and read by every flow.
+ *
+ * `events.seq` is the watermark a flow reads by. It is assigned at insert, so it only orders rows
+ * that were inserted serially — which holds because one process ingests a chain and writes its logs
+ * in a single awaited loop. Two ingest replicas on one chain would break it. Cursors are per
+ * (chain, role) so a backfilling role can trail the tip without dragging the others back; the price
+ * is that `seq` then stops matching block order, which the flows tolerate by design.
  */
 const CORE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS cursors (
-  chain TEXT PRIMARY KEY,
-  block_number BIGINT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS events (
-  chain TEXT NOT NULL,
-  tx_hash TEXT NOT NULL,
-  log_index INTEGER NOT NULL,
-  address TEXT NOT NULL,
-  block_number BIGINT NOT NULL,
-  topics TEXT[] NOT NULL,
-  data TEXT NOT NULL,
-  ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  processed_at TIMESTAMPTZ,
+  seq             BIGSERIAL,
+  chain           TEXT NOT NULL,
+  tx_hash         TEXT NOT NULL,
+  log_index       INTEGER NOT NULL,
+  address         TEXT NOT NULL,
+  block_number    BIGINT NOT NULL,
+  block_timestamp BIGINT NOT NULL,
+  topics          TEXT[] NOT NULL,
+  data            TEXT NOT NULL,
+  -- Only where a watch entry asks for it; most events name whoever matters themselves.
+  sender          TEXT,
   PRIMARY KEY (chain, tx_hash, log_index)
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_pending ON events (ingested_at) WHERE processed_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_events_block ON events (chain, block_number);
+CREATE INDEX IF NOT EXISTS idx_events_seq ON events (chain, seq);
+
+CREATE TABLE IF NOT EXISTS cursors (
+  chain        TEXT NOT NULL,
+  role         TEXT NOT NULL,
+  block_number BIGINT NOT NULL,
+  PRIMARY KEY (chain, role)
+);
+
+CREATE TABLE IF NOT EXISTS readers (
+  name  TEXT NOT NULL,
+  chain TEXT NOT NULL,
+  seq   BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (name, chain)
+);
+
+CREATE TABLE IF NOT EXISTS dead_events (
+  reader    TEXT NOT NULL,
+  chain     TEXT NOT NULL,
+  seq       BIGINT NOT NULL,
+  tx_hash   TEXT NOT NULL,
+  log_index INTEGER NOT NULL,
+  error     TEXT NOT NULL,
+  failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (reader, chain, seq)
+);
 `;
+
+/** Channel ingest nudges readers over, so a drain never waits out its backstop interval. */
+export const EVENTS_CHANNEL = "scan_events";
 
 export async function initCore(): Promise<void> {
   await pool.query(CORE_SCHEMA);
@@ -39,75 +67,165 @@ export async function initCore(): Promise<void> {
 }
 
 export interface EventRow {
+  seq: string;
   chain: string;
   tx_hash: string;
   log_index: number;
   address: string;
   block_number: string;
+  block_timestamp: string;
   topics: string[];
   data: string;
-  ingested_at: string;
-  processed_at: string | null;
+  sender: string | null;
+}
+
+/** One raw log, as ingest writes it. */
+export interface RawEvent {
+  txHash: string;
+  logIndex: number;
+  address: string;
+  blockNumber: bigint;
+  blockTimestamp: number;
+  topics: readonly string[];
+  data: string;
+  sender?: string;
 }
 
 /**
- * Insert a raw event. Returns true if inserted, false if already seen.
+ * Write a batch of logs. Duplicates are ignored, so a re-scan of the same range is free.
  *
- * @param chain       chain name
- * @param txHash      transaction hash (synthetic `${blockHash}-${i}` for substrate EVM.Log)
- * @param logIndex    log index within the tx/block
- * @param address     emitting contract address
- * @param blockNumber block number
- * @param topics      indexed topics (topic0 = event signature)
- * @param data        ABI-encoded non-indexed data
+ * @param chain Chain name.
+ * @param events The logs, in block then log-index order.
+ * @returns How many were new.
  */
-export async function insertEvent(
-  chain: string,
-  txHash: string,
-  logIndex: number,
-  address: string,
-  blockNumber: bigint,
-  topics: readonly string[],
-  data: string,
-): Promise<boolean> {
-  const r = await pool.query(
-    `INSERT INTO events (chain, tx_hash, log_index, address, block_number, topics, data)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
-    [chain, txHash, logIndex, address.toLowerCase(), blockNumber.toString(), topics, data],
-  );
-  return (r.rowCount ?? 0) > 0;
+export async function insertEvents(chain: string, events: RawEvent[]): Promise<number> {
+  let inserted = 0;
+  for (const e of events) {
+    const r = await pool.query(
+      `INSERT INTO events (chain, tx_hash, log_index, address, block_number, block_timestamp, topics, data, sender)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
+      [
+        chain,
+        e.txHash,
+        e.logIndex,
+        e.address.toLowerCase(),
+        e.blockNumber.toString(),
+        e.blockTimestamp,
+        e.topics,
+        e.data,
+        e.sender?.toLowerCase() ?? null,
+      ],
+    );
+    inserted += r.rowCount ?? 0;
+  }
+  return inserted;
 }
 
-/** Pick up to `limit` unprocessed events in ingestion order, restricted to enabled chains. */
-export async function takePendingEvents(limit: number, chains: string[]): Promise<EventRow[]> {
+export async function loadCursor(chain: string, role: string): Promise<bigint | null> {
+  const r = await pool.query(`SELECT block_number FROM cursors WHERE chain = $1 AND role = $2`, [
+    chain,
+    role,
+  ]);
+  return r.rows[0] ? BigInt(r.rows[0].block_number) : null;
+}
+
+export async function saveCursor(chain: string, role: string, block: bigint): Promise<void> {
+  await pool.query(
+    `INSERT INTO cursors (chain, role, block_number) VALUES ($1, $2, $3)
+     ON CONFLICT (chain, role) DO UPDATE SET block_number = EXCLUDED.block_number`,
+    [chain, role, block.toString()],
+  );
+}
+
+/** How far each role on a chain has indexed — the lowest is what the chain has truly covered. */
+export async function chainCursors(chain: string): Promise<Record<string, string>> {
+  const r = await pool.query(`SELECT role, block_number FROM cursors WHERE chain = $1`, [chain]);
+  return Object.fromEntries(r.rows.map((x) => [x.role, x.block_number]));
+}
+
+// ─── Reader side ─────────────────────────────────────────────────
+
+/** Tell readers a chain has new events. Best-effort: the backstop interval covers a missed nudge. */
+export async function notifyEvents(chain: string): Promise<void> {
+  try {
+    await pool.query(`SELECT pg_notify($1, $2)`, [EVENTS_CHANNEL, chain]);
+  } catch {
+    // a nudge is an optimisation, never a correctness requirement
+  }
+}
+
+/**
+ * Subscribe to ingest's nudges on a dedicated connection — LISTEN holds its session, so it cannot
+ * share the pool. Reconnects on its own; the caller's backstop interval covers the gap.
+ *
+ * @param onEvent Called with the chain name that gained events.
+ */
+export function listenEvents(onEvent: (chain: string) => void): void {
+  const connect = (): void => {
+    const client = new pg.Client({ connectionString: databaseUrl });
+    client.on("notification", (n) => onEvent(n.payload ?? ""));
+    client.on("error", (e) => {
+      log.warn(`listener: ${e.message}`);
+      client.end().catch(() => {});
+      setTimeout(connect, 5_000);
+    });
+    client
+      .connect()
+      .then(() => client.query(`LISTEN ${EVENTS_CHANNEL}`))
+      .catch((e) => {
+        log.warn(`listener: ${(e as Error).message}`);
+        setTimeout(connect, 5_000);
+      });
+  };
+  connect();
+}
+
+/** Events a reader has not seen yet, oldest first. */
+export async function takeEvents(chain: string, after: bigint, limit: number): Promise<EventRow[]> {
   const r = await pool.query(
-    `SELECT * FROM events WHERE processed_at IS NULL AND chain = ANY($2)
-     ORDER BY ingested_at ASC LIMIT $1`,
-    [limit, chains],
+    `SELECT * FROM events WHERE chain = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`,
+    [chain, after.toString(), limit],
   );
   return r.rows;
 }
 
-export async function markProcessed(
+export async function readerSeq(name: string, chain: string): Promise<bigint> {
+  const r = await pool.query(`SELECT seq FROM readers WHERE name = $1 AND chain = $2`, [
+    name,
+    chain,
+  ]);
+  return r.rows[0] ? BigInt(r.rows[0].seq) : 0n;
+}
+
+/** Advance a reader. Must run inside the same transaction as the writes it accounts for. */
+export async function advanceReader(
+  db: pg.PoolClient | pg.Pool,
+  name: string,
   chain: string,
-  txHash: string,
-  logIndex: number,
+  seq: bigint,
+): Promise<void> {
+  await db.query(
+    `INSERT INTO readers (name, chain, seq) VALUES ($1, $2, $3)
+     ON CONFLICT (name, chain) DO UPDATE SET seq = EXCLUDED.seq`,
+    [name, chain, seq.toString()],
+  );
+}
+
+/** Park an event a reader cannot process, so one bad log never wedges the queue. */
+export async function deadLetter(
+  name: string,
+  row: EventRow,
+  error: string,
 ): Promise<void> {
   await pool.query(
-    `UPDATE events SET processed_at = NOW() WHERE chain = $1 AND tx_hash = $2 AND log_index = $3`,
-    [chain, txHash, logIndex],
+    `INSERT INTO dead_events (reader, chain, seq, tx_hash, log_index, error)
+     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+    [name, row.chain, row.seq, row.tx_hash, row.log_index, error.slice(0, 2_000)],
   );
 }
 
-export async function loadCursor(chain: string): Promise<bigint | null> {
-  const r = await pool.query(`SELECT block_number FROM cursors WHERE chain = $1`, [chain]);
-  return r.rows[0] ? BigInt(r.rows[0].block_number) : null;
-}
-
-export async function saveCursor(chain: string, block: bigint): Promise<void> {
-  await pool.query(
-    `INSERT INTO cursors (chain, block_number) VALUES ($1, $2)
-     ON CONFLICT (chain) DO UPDATE SET block_number = EXCLUDED.block_number`,
-    [chain, block.toString()],
-  );
+/** Reader progress for /api/status. */
+export async function readerState(name: string): Promise<Record<string, string>> {
+  const r = await pool.query(`SELECT chain, seq FROM readers WHERE name = $1`, [name]);
+  return Object.fromEntries(r.rows.map((x) => [x.chain, x.seq]));
 }
