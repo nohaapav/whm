@@ -41,12 +41,12 @@ async function start(): Promise<void> {
       sequence: vaa.sequence.toString(),
     });
 
-    queue.add({
+    await queue.add({
       label: `${route.source} oracle`,
       logger: log,
-      next,
       submit: (n) => receiveMessage(clients, receiverAbi, route.receiver, vaa.bytes, n),
     });
+    return next();
   }
 
   const app = createApp(engineConfig(), {

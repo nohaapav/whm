@@ -9,13 +9,9 @@ import { WORMHOLE } from "../../chains";
 export const APP_NAME = opt("APP_NAME", "intent-relayer");
 
 export const RPC_ETHEREUM = rpc("ethereum", "https://eth.llamarpc.com");
+
 /** Read-only: the source tx receipt the forwarding instruction is found in. */
 export const RPC_HYDRATION = rpc("hydration", "https://hydration-rpc.n.dwellir.com");
-
-export const QUOTER_URL = opt("QUOTER_URL", "http://localhost:8080");
-
-/** Passed to the quoter so the fee reflects what processOrder actually costs. */
-export const GAS_LIMIT = "500000";
 
 /**
  * Cold-start floor; ignored once a safeSequence exists in Redis.

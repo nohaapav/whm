@@ -54,12 +54,12 @@ async function start(): Promise<void> {
       return next();
     }
 
-    queue.add({
+    await queue.add({
       label: `${route.token} transfer`,
       logger: log,
-      next,
       submit: (n) => receiveMessage(clients, transceiverAbi, route.transceiver, vaa.bytes, n),
     });
+    return next();
   }
 
   const app = createApp(engineConfig(), {

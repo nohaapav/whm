@@ -51,7 +51,6 @@ services:
       PRIVKEY: FILL THIS KEY ALWAYS
       RPC_ETHEREUM: https://ethereum-rpc.publicnode.com
       RPC_HYDRATION: https://rpc.hydradx.cloud
-      QUOTER_URL: http://quoter_app:8080 # quoter stack's service, reached over quoter_default
       # The WETH transceiver had 22 sequences before intents existed and none carries an
       # instruction. Read only on this namespace's first run.
       FROM_SEQ_HYDRATION: '22'

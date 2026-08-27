@@ -1,7 +1,7 @@
 import { formatEther, formatGwei, type Account, type Hash, type PublicClient } from "viem";
 
 import logger from "../logger";
-import type { Next } from "../types";
+import { isDone, revertName } from "./revert";
 
 /** Enough gas for one submission; below this the process is out of runway and exits. */
 const MIN_GAS = 1_000_000n;
@@ -18,8 +18,6 @@ export interface Task {
   /** Short identifier for logs, e.g. the manager sequence or the token. */
   label: string;
   logger: typeof logger;
-  /** Hand the workflow back to the engine once the task is finished with. */
-  next: Next;
   /**
    * Send the transaction. The queue owns the nonce so submissions stay strictly ordered.
    *
@@ -27,6 +25,12 @@ export interface Task {
    * @returns The mined transaction hash.
    */
   submit(nonce: number): Promise<Hash>;
+}
+
+/** A queued task plus the settlement of the promise `add` handed its caller. */
+interface Queued extends Task {
+  resolve(): void;
+  reject(err: unknown): void;
 }
 
 export interface QueueDeps {
@@ -43,13 +47,13 @@ export interface QueueDeps {
  *
  * The engine can hand us several VAAs at once, and a relayer wallet has one nonce — so submissions
  * run one at a time rather than racing. A task that fails for a reason that means "already done"
- * acks the workflow; "nonce too low" reloads the nonce and retries; anything else is logged and
- * acked so one bad VAA cannot wedge the queue.
+ * resolves; "nonce too low" reloads the nonce and retries in place; anything else rejects, because
+ * only a proven outcome may be reported as one.
  */
 export function createQueue(deps: QueueDeps) {
   const { publicClient, account, warnMultiplier } = deps;
 
-  const pending: Task[] = [];
+  const pending: Queued[] = [];
   let nonce: number;
   let processing = false;
   let started = false;
@@ -88,7 +92,8 @@ export function createQueue(deps: QueueDeps) {
     const warnBalance = minBalance * warnMultiplier;
     const multiplier = minBalance > 0n ? Number((balance * 100n) / minBalance) / 100 : 0;
     const pct = Math.min(100, Math.round((multiplier / Number(warnMultiplier)) * 100));
-    const bar = "█".repeat(Math.round((pct / 100) * 20)) + "░".repeat(20 - Math.round((pct / 100) * 20));
+    const bar =
+      "█".repeat(Math.round((pct / 100) * 20)) + "░".repeat(20 - Math.round((pct / 100) * 20));
 
     const summary =
       `${chain} | \`${account.address}\` | ${multiplier.toFixed(1)}x/${warnMultiplier}x ` +
@@ -116,16 +121,6 @@ export function createQueue(deps: QueueDeps) {
     logger.info(`Gas: ${summary}`);
   }
 
-  function isDone(text: string): boolean {
-    return (
-      text.includes("transfer already completed") ||
-      text.includes("already been redeemed") ||
-      text.includes("VAA already processed") ||
-      text.includes("AlreadyRedeemed") ||
-      text.includes("TransferAlreadyCompleted")
-    );
-  }
-
   async function drain(): Promise<void> {
     if (processing || pending.length === 0) return;
 
@@ -136,23 +131,23 @@ export function createQueue(deps: QueueDeps) {
       const hash = await task.submit(nonce);
       task.logger.info(`${task.label} submitted in ${hash}`);
       task.logger.info(`Next nonce: ${++nonce}`);
-      void task.next();
+      task.resolve();
     } catch (e) {
-      // BigInt-safe: viem errors carry gas/value fields, and a raw stringify would throw
-      // inside this catch — killing the process on the one path that must survive.
-      const text =
-        JSON.stringify(e, (_, v) => (typeof v === "bigint" ? v.toString() : v)) +
-        ((e as Error).message ?? "");
-      if (isDone(text)) {
+      const name = revertName(e);
+      const message = (e as Error).message ?? String(e);
+
+      if (isDone(name)) {
         task.logger.info(`${task.label} already completed`);
-        void task.next();
-      } else if (text.includes("nonce too low")) {
+        task.resolve();
+      } else if (message.includes("nonce too low")) {
         task.logger.info("nonce too low, reloading");
         nonce = await publicClient.getTransactionCount({ address: account.address });
         pending.unshift(task);
       } else {
-        task.logger.error(`${task.label}: ${(e as Error).message ?? e}`);
-        void task.next();
+        // Not proven finished — a queued settlement, an underfunded receiver, an RPC blip. Hand it
+        // back so the engine retries with backoff rather than acking a failure as a success.
+        task.logger.warn(`${task.label} failed${name ? ` (${name})` : ""}: ${message}`);
+        task.reject(e);
       }
     } finally {
       processing = false;
@@ -170,9 +165,22 @@ export function createQueue(deps: QueueDeps) {
       return nonce;
     },
 
-    add(task: Task): void {
-      pending.push(task);
-      void drain();
+    /**
+     * Queue one submission.
+     *
+     * Awaiting the result is what keeps the submission inside the caller's workflow: a rejection
+     * here surfaces as a handler throw, which is the only thing the engine will retry. Discard it
+     * and a failed transaction is indistinguishable from a delivered one.
+     *
+     * @param task What to send, and how to label it in the log.
+     * @returns Resolves once submitted, or once the work turns out to be already done. Rejects on
+     *          anything unproven, for the caller to hand back to the engine.
+     */
+    add(task: Task): Promise<void> {
+      return new Promise<void>((resolve, reject) => {
+        pending.push({ ...task, resolve, reject });
+        void drain();
+      });
     },
 
     get nonce(): number {

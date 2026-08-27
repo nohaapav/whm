@@ -9,6 +9,7 @@ import { createApp } from "../../engine/app";
 import { onEmitter } from "../../engine/emitter";
 import { isNttTransfer, settlementSequence } from "../../engine/ntt";
 import { createQueue } from "../../engine/queue";
+import { isDone, revertName } from "../../engine/revert";
 import { fetchVaa, normalizeTxHash } from "../../engine/vaa";
 import logger from "../../logger";
 import type { Next, RelayerCtx } from "../../types";
@@ -18,7 +19,6 @@ import {
   APP_NAME,
   FROM_SEQUENCE,
   MAX_VAA_AGE_MS,
-  QUOTER_URL,
   RETRIES,
   RETRY_BASE_MS,
   RETRY_MAX_MS,
@@ -26,7 +26,6 @@ import {
   RPC_HYDRATION,
 } from "./config";
 import { findInstruction } from "./instruction";
-import { quoteRelayFee } from "./quote";
 import { route } from "./routes";
 
 /**
@@ -61,7 +60,44 @@ async function start(): Promise<void> {
   logger.info(`  transceiver: ${transceiver} @ hydration`);
   logger.info(`  emitter:     ${emitter} @ hydration`);
   logger.info(`  receiver:    ${receiver} @ ethereum`);
-  logger.info(`  quoter:      ${QUOTER_URL}`);
+
+  /**
+   * processOrder's arguments. Built in one place so the gas estimate and the submission are the
+   * same call — an estimate of a slightly different call is worse than no estimate.
+   */
+  function orderArgs(nttVaa: Buffer, instructionVaa: Buffer, fee: bigint) {
+    return [`0x${nttVaa.toString("hex")}`, `0x${instructionVaa.toString("hex")}`, fee] as const;
+  }
+
+  /**
+   * What forwarding this order costs, measured rather than forecast.
+   *
+   * Gas varies per order — guardian signature count, whether the settlement still needs delivering,
+   * cold storage — so a configured limit drifts out of date silently. Priced at maxFeePerGas because
+   * that is the most the transaction can cost; the relayer pays effectiveGasPrice, so the gap is
+   * headroom against the price moving between here and the block that mines it.
+   *
+   * Estimated at the order's own ceiling, the largest fee the call can legally carry.
+   *
+   * @param nttVaa The settlement.
+   * @param instructionVaa The forwarding instruction for the same manager sequence.
+   * @param ceiling The order's maxRelayFee.
+   * @returns The fee to claim, in wei.
+   * @throws The call's own revert, when the order is not deliverable at this block.
+   */
+  async function quote(nttVaa: Buffer, instructionVaa: Buffer, ceiling: bigint): Promise<bigint> {
+    const [gas, fees] = await Promise.all([
+      eth.estimateContractGas({
+        address: receiver,
+        abi: receiverAbi,
+        functionName: "processOrder",
+        args: orderArgs(nttVaa, instructionVaa, ceiling),
+        account,
+      }),
+      eth.estimateFeesPerGas(),
+    ]);
+    return gas * fees.maxFeePerGas;
+  }
 
   /**
    * Deliver a settlement and forward it, in one call. Simulated first so a revert surfaces as a
@@ -69,11 +105,7 @@ async function start(): Promise<void> {
    * mismatch, underfunded) rather than burning gas.
    */
   async function forward(nttVaa: Buffer, instructionVaa: Buffer, fee: bigint, nonce: number) {
-    const args = [
-      `0x${nttVaa.toString("hex")}`,
-      `0x${instructionVaa.toString("hex")}`,
-      fee,
-    ] as const;
+    const args = orderArgs(nttVaa, instructionVaa, fee);
 
     await eth.simulateContract({
       address: receiver,
@@ -105,6 +137,7 @@ async function start(): Promise<void> {
   async function handle(ctx: RelayerCtx, next: Next): Promise<void> {
     const { vaa, sourceTxHash } = ctx;
     const log = ctx.logger!.child({ sourceTxHash, sequence: vaa.sequence.toString() });
+    const attempt = ctx.storage?.job?.attempts ?? 0;
 
     if (!isNttTransfer(vaa.payload)) {
       log.info("Ignoring non-transfer NTT transceiver message");
@@ -136,8 +169,26 @@ async function start(): Promise<void> {
       return next();
     }
 
-    const attempt = ctx.storage?.job?.attempts ?? 0;
-    const fee = await quoteRelayFee();
+    const instructionVaa = await fetchVaa(
+      ctx,
+      WORMHOLE.hydration,
+      emitterHex,
+      order.messageSequence,
+    );
+
+    let fee: bigint;
+    try {
+      fee = await quote(vaa.bytes, instructionVaa, order.maxRelayFee);
+    } catch (e) {
+      const name = revertName(e);
+      if (isDone(name)) {
+        log.info(`Order ${sequence} already completed`);
+        return next();
+      }
+      log.warn(`Order ${sequence} not deliverable yet (${name ?? "no revert data"}); retrying`);
+      throw e;
+    }
+
     if (fee > order.maxRelayFee) {
       const reason =
         `Order ${sequence} unprofitable (attempt ${attempt}/${RETRIES}): ` +
@@ -146,24 +197,17 @@ async function start(): Promise<void> {
       throw new Error(reason);
     }
 
-    const instructionVaa = await fetchVaa(
-      ctx,
-      WORMHOLE.hydration,
-      emitterHex,
-      order.messageSequence,
-    );
-
     log.info(
       `Order ${sequence}: ${order.amount} wei -> ${order.depositAddress}, ` +
         `fee ${fee} <= ${order.maxRelayFee} (attempt ${attempt}/${RETRIES})`,
     );
 
-    queue.add({
+    await queue.add({
       label: `order ${sequence}`,
       logger: log,
-      next,
       submit: (n) => forward(vaa.bytes, instructionVaa, fee, n),
     });
+    return next();
   }
 
   const app = createApp(engineConfig(), {
