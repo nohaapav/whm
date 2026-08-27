@@ -30,6 +30,7 @@ interface IIntentReceiver {
 
     event Swept(address indexed to, uint256 amount);
     event EmitterUpdated(bytes32 indexed emitter);
+    event RelayerAuthorized(address indexed relayer, bool enabled);
 
     // ─── Errors ──────────────────────────────────────────────────
 
@@ -50,13 +51,16 @@ interface IIntentReceiver {
     error SettlementNotReleased(uint64 sequence);
     error FeeExceedsCeiling();
     error AlreadyRedeemed();
+    /// @dev Caller is not authorized and the order is still inside its exclusive window. Expires, so
+    ///      liveness never depends on any one relayer.
+    error Unauthorized();
 
     // ─── Core ────────────────────────────────────────────────────
 
     /// @notice Deliver a settlement and forward it where its instruction says.
-    /// @dev Permissionless — the instruction, not the caller, dictates the destination, and it is
-    ///      read from a guardian-signed VAA whose emitter is pinned. Reverts if the forward fails,
-    ///      leaving the instruction executable for retry.
+    /// @dev The destination comes from a guardian-signed instruction whose emitter is pinned, never
+    ///      from the caller. Any caller may process, except inside the exclusive window while an
+    ///      allowlist is set. Reverts if the forward fails, leaving the instruction executable.
     /// @param nttVaa         the NTT transfer VAA. Delivered here unless someone already did.
     /// @param instructionVaa the emitter's instruction for the same sequence
     /// @param feeRequested   relay fee the caller claims, ≤ the instruction's `maxRelayFee`
@@ -68,7 +72,10 @@ interface IIntentReceiver {
     function owner() external view returns (address);
     function emitterAddress() external view returns (bytes32);
     function processed(bytes32 vaaHash) external view returns (bool);
+    function authorizedRelayer(address relayer) external view returns (bool);
+    function authorizedRelayerCount() external view returns (uint256);
     function setOwner(address newOwner) external;
     function setEmitter(bytes32 emitter) external;
+    function setAuthorizedRelayer(address relayer, bool enabled) external;
     function sweep(address to, uint256 amount) external;
 }

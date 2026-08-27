@@ -7,7 +7,7 @@ import { ifs, wallet } from "@whm/common/evm";
 
 import intentReceiverJson from "../../out/IntentReceiver.sol/IntentReceiver.json";
 
-const { requiredArg, optionalArg, requiredEnv } = args;
+const { requiredArg, optionalArg, requiredEnv, optionalEnv } = args;
 const { getWallet } = wallet;
 
 /** Hydration's Wormhole chain id — the only emitter chain the receiver accepts. */
@@ -169,7 +169,11 @@ async function preflight(
   console.log("wormhole:          ", wormhole);
   console.log("transceiver:       ", transceiver);
   console.log("pinned emitter:    ", pinnedEmitter);
-  console.log("instruction emitter:", instruction.emitterAddress, `chain ${instruction.emitterChainId}`);
+  console.log(
+    "instruction emitter:",
+    instruction.emitterAddress,
+    `chain ${instruction.emitterChainId}`,
+  );
   console.log("instruction seq:   ", sequence.toString());
   console.log("settlement seq:    ", settled.toString());
   console.log("depositAddress:    ", depositAddress);
@@ -180,7 +184,10 @@ async function preflight(
   console.log("receiver balance:  ", balance.toString(), `(${formatEther(balance)} ETH)`);
   console.log("──────────────────────────────────────────────");
 
-  if (instruction.emitterChainId !== HYDRATION_CHAIN || instruction.emitterAddress !== pinnedEmitter) {
+  if (
+    instruction.emitterChainId !== HYDRATION_CHAIN ||
+    instruction.emitterAddress !== pinnedEmitter
+  ) {
     console.error(
       `✗ UnauthorizedEmitter — instruction is from ${instruction.emitterChainId}/${instruction.emitterAddress}, ` +
         `receiver pins ${HYDRATION_CHAIN}/${pinnedEmitter}.`,
@@ -192,11 +199,15 @@ async function preflight(
     return false;
   }
   if (sequence !== settled) {
-    console.error(`✗ SequenceMismatch — instruction names ${sequence}, settlement carries ${settled}.`);
+    console.error(
+      `✗ SequenceMismatch — instruction names ${sequence}, settlement carries ${settled}.`,
+    );
     return false;
   }
   if (feeRequested > maxRelayFee) {
-    console.error(`✗ FeeExceedsCeiling — feeRequested (${feeRequested}) > maxRelayFee (${maxRelayFee}).`);
+    console.error(
+      `✗ FeeExceedsCeiling — feeRequested (${feeRequested}) > maxRelayFee (${maxRelayFee}).`,
+    );
     return false;
   }
   // Only checkable when the settlement has already landed. Otherwise this call delivers it, and what
@@ -227,7 +238,7 @@ async function preflight(
  * Runs a read-only preflight first and aborts with a precise verdict instead of sending a doomed tx.
  * Pass --force to send anyway.
  *
- * Env:  RPC, CHAIN_ID
+ * Env:  RPC, CHAIN_ID, RPC_SUBMIT? (private broadcast endpoint — reads still go to RPC)
  * Args: --pk --address(IntentReceiver) --nttVaa --instructionVaa [--feeRequested(wei, default 0)] [--force]
  *
  * @returns resolves once the tx is mined and OrderProcessed is logged
@@ -249,9 +260,17 @@ async function main(): Promise<void> {
   const { publicClient, walletClient, account } = getWallet(rpcUrl, chainId, privateKey);
   const { abi } = intentReceiverJson as ifs.ContractArtifact;
 
+  // Recovering an order whose exclusive window has lapsed means broadcasting a call anyone can
+  // profitably copy, fee and all. RPC_SUBMIT sends it somewhere private instead; reads stay on RPC.
+  const submitRpc = optionalEnv("RPC");
+  const submitter = submitRpc
+    ? getWallet(submitRpc, chainId, privateKey).walletClient
+    : walletClient;
+
   console.log("IntentReceiver:", address);
   console.log("relayer:       ", account.address);
   console.log("feeRequested:  ", feeRequested.toString(), `(${formatEther(feeRequested)} ETH)`);
+  console.log("submit via:    ", submitRpc ?? rpcUrl);
 
   const ok = await preflight(
     publicClient,
@@ -266,19 +285,41 @@ async function main(): Promise<void> {
   }
   if (!ok) console.warn("⚠ preflight failed but --force set — sending anyway.");
 
-  const hash = await walletClient.writeContract({
+  // Estimated, not guessed: a private endpoint may not serve eth_estimateGas, and the limit has to
+  // be the real one either way.
+  const gas = await publicClient.estimateContractGas({
     address: address as `0x${string}`,
     abi,
     functionName: "processOrder",
     args: [nttVaa, instructionVaa, feeRequested],
-    gas: 2_000_000n,
+    account,
+  });
+  console.log("gas:           ", gas.toString());
+
+  const hash = await submitter.writeContract({
+    address: address as `0x${string}`,
+    abi,
+    functionName: "processOrder",
+    args: [nttVaa, instructionVaa, feeRequested],
+    gas,
   });
   console.log("processOrder tx:", hash);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
-  console.log("status:", receipt.status, "block:", receipt.blockNumber);
+  console.log(
+    "status:",
+    receipt.status,
+    "block:",
+    receipt.blockNumber,
+    "gasUsed:",
+    receipt.gasUsed,
+  );
+  if (receipt.status === "reverted") {
+    throw new Error(`processOrder reverted in ${hash} — nothing was delivered.`);
+  }
 
   const forwarded = parseEventLogs({ abi, eventName: "OrderProcessed", logs: receipt.logs })[0];
-  if (!forwarded) throw new Error("processOrder succeeded but no OrderProcessed event — investigate.");
+  if (!forwarded)
+    throw new Error("processOrder succeeded but no OrderProcessed event — investigate.");
   const { transferSequence, depositAddress, amount } = forwarded.args as {
     transferSequence: bigint;
     depositAddress: string;

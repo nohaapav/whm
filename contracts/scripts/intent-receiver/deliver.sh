@@ -8,14 +8,14 @@ set -euo pipefail
 RECEIVER=0x2173F6ecE25768e7EFc5199f70f8783d88Ba63c8
 TRANSCEIVER=0000000000000000000000008acce9ca511d5d7213f8c3f813b8916087cd00ae
 EMITTER=00000000000000000000000098f1ebc9dcc8ab7ba54d83c98500e9e313f793f2
-CEILING=17049662280000          # order's maxRelayFee — claim at most this
+CEILING=130000000000000          # order's maxRelayFee — claim at most this
 
 api() { curl -sS -m 30 "https://api.wormholescan.io/api/v1/vaas/73/$1/$2" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["vaa"])'; }
 
 echo "fetching VAAs..."
-NTT_VAA=$(api "$TRANSCEIVER" 25)
-INSTRUCTION_VAA=$(api "$EMITTER" 3)
+NTT_VAA=$(api "$TRANSCEIVER" 29)
+INSTRUCTION_VAA=$(api "$EMITTER" 7)
 echo "  settlement  ${#NTT_VAA} chars"
 echo "  instruction ${#INSTRUCTION_VAA} chars"
 

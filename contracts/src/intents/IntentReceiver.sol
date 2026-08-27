@@ -31,6 +31,9 @@ import {IIntentReceiver} from "./interfaces/IIntentReceiver.sol";
 contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
     using NttPayload for bytes;
 
+    /// @notice Head start for authorized relayers, from the settlement VAA's timestamp.
+    uint256 internal constant EXCLUSIVE_WINDOW = 5 minutes;
+
     address public owner;
     IWormhole public wormhole;
     IWormholeTransceiver public transceiver;
@@ -39,6 +42,11 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
     bytes32 public emitterAddress;
 
     mapping(bytes32 => bool) public processed;
+
+    /// @notice Relayers that may process inside EXCLUSIVE_WINDOW. Empty means permissionless always.
+    /// @dev Appended after `processed` — UUPS, so the preceding layout is fixed.
+    mapping(address => bool) public authorizedRelayer;
+    uint256 public authorizedRelayerCount;
 
     modifier onlyOwner() {
         _onlyOwner();
@@ -90,6 +98,9 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
         // Delivered is not released.
         _requireReleased(settlement, sequence);
 
+        // Below the proof, not above it: only now is the settlement's timestamp trustworthy.
+        _requireCallerMayProcess(settlement);
+
         if (address(this).balance < amount) revert NotFunded(amount, address(this).balance);
 
         uint256 forwardAmount = amount - feeRequested;
@@ -130,6 +141,19 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
         if (depositAddress == address(0)) revert MalformedInstruction();
     }
 
+    /// @dev The VAAs are public once signed and this pays msg.sender, so anyone can rebuild the call —
+    ///      or copy a pending one out of the mempool. The window makes that unprofitable without
+    ///      making delivery depend on us: it expires, and an empty allowlist disables it entirely.
+    ///
+    ///      Timed from the settlement, not the instruction: the instruction publishes at consistency
+    ///      200 against the settlement's 202, so it can be signed blocks before the leg a relayer
+    ///      actually waits on.
+    /// @param settlement Trustworthy only after the settlement is proven — it is parsed unverified.
+    function _requireCallerMayProcess(IWormhole.VM memory settlement) private view {
+        if (authorizedRelayerCount == 0 || authorizedRelayer[msg.sender]) return;
+        if (block.timestamp < uint256(settlement.timestamp) + EXCLUSIVE_WINDOW) revert Unauthorized();
+    }
+
     /// @dev Assert the settlement's funds landed here, rather than inferring it from delivery: the
     ///      manager marks a message executed before the inbound rate limiter runs, and a queued
     ///      transfer releases nothing until someone completes it.
@@ -167,6 +191,15 @@ contract IntentReceiver is Initializable, UUPSUpgradeable, IIntentReceiver {
     function setEmitter(bytes32 emitter) external onlyOwner {
         emitterAddress = emitter;
         emit EmitterUpdated(emitter);
+    }
+
+    /// @notice Grant or revoke exclusive-window access. The first grant turns the window on for
+    ///         everyone else; revoking the last turns it off again.
+    function setAuthorizedRelayer(address relayer, bool enabled) external onlyOwner {
+        if (authorizedRelayer[relayer] == enabled) return;
+        authorizedRelayer[relayer] = enabled;
+        enabled ? authorizedRelayerCount++ : authorizedRelayerCount--;
+        emit RelayerAuthorized(relayer, enabled);
     }
 
     /// @notice Emergency withdrawal.

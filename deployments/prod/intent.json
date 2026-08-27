@@ -2,7 +2,7 @@
   "migration": "intent",
   "environment": "prod",
   "startedAt": "2026-08-25T13:56:24.900Z",
-  "completedAt": "2026-08-25T13:57:27.013Z",
+  "completedAt": "2026-08-26T13:22:28.663Z",
   "steps": [
     {
       "name": "001-deploy-emitter",
@@ -20,7 +20,7 @@
       "name": "002-deploy-receiver",
       "status": "completed",
       "output": {
-        "implAddress": "0xf3dfa160d807538b3882c77f0b96e27cf96150b1",
+        "implAddress": "0x560406e9f3ef82d3da1fe5ef4833616008139101",
         "proxyAddress": "0x2173f6ece25768e7efc5199f70f8783d88ba63c8",
         "ownerAddress": "0x6d116C3E43Bc1bFd4EEBe5c7BF043a342Ea6bBB2"
       },
@@ -64,6 +64,18 @@
       "error": null,
       "startedAt": "2026-08-25T13:57:09.799Z",
       "completedAt": "2026-08-25T13:57:27.013Z"
+    },
+    {
+      "name": "006-authorize-relayer-1@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0xaf92992c2c72e416cbaf9f074dbc118603bc50cccf734800eab493aa13dc0c6b",
+        "receiver": "0x2173f6ece25768e7efc5199f70f8783d88ba63c8",
+        "relayer": "0x43A8A728e2514EDEAe8e0C9FAb8B79fb5E4ecD5F"
+      },
+      "error": null,
+      "startedAt": "2026-08-26T13:22:11.366Z",
+      "completedAt": "2026-08-26T13:22:28.662Z"
     }
   ]
 }

@@ -415,6 +415,93 @@ contract IntentReceiverTest is Test {
         _redeem(SEQUENCE, 0);
     }
 
+    // ─── Exclusive window ───────────────────────────────────────────
+
+    /// @dev Mirrors EXCLUSIVE_WINDOW, which is internal. Both VAAs carry the current block time, so
+    ///      building them before warping is what lets an order age.
+    uint256 constant WINDOW = 5 minutes;
+
+    function testPermissionlessWhileNoRelayerIsAuthorized() public {
+        vm.prank(makeAddr("stranger"));
+        _redeem(SEQUENCE, 0);
+
+        assertEq(depositAddress.balance, AMOUNT, "an empty allowlist must gate nothing");
+    }
+
+    function testOutsiderIsHeldOffInsideTheWindow() public {
+        receiver.setAuthorizedRelayer(relayer, true);
+
+        vm.prank(makeAddr("frontrunner"));
+        vm.expectRevert(IIntentReceiver.Unauthorized.selector);
+        _redeem(SEQUENCE, MAX_RELAY_FEE);
+    }
+
+    function testAuthorizedRelayerProcessesInsideTheWindow() public {
+        receiver.setAuthorizedRelayer(relayer, true);
+
+        vm.prank(relayer);
+        _redeem(SEQUENCE, MAX_RELAY_FEE);
+
+        assertEq(relayer.balance, MAX_RELAY_FEE, "the authorized caller keeps its fee");
+    }
+
+    function testWindowExpiresIntoAPublicFallback() public {
+        receiver.setAuthorizedRelayer(relayer, true);
+        bytes memory settlement = _settlement(SEQUENCE);
+        bytes memory instruction = _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE);
+
+        address stranger = makeAddr("stranger");
+
+        // One second short: still exclusive.
+        vm.warp(block.timestamp + WINDOW - 1);
+        vm.prank(stranger);
+        vm.expectRevert(IIntentReceiver.Unauthorized.selector);
+        receiver.processOrder(settlement, instruction, MAX_RELAY_FEE);
+
+        // On the boundary it opens, so a stalled relayer costs latency and never delivery.
+        vm.warp(block.timestamp + 1);
+        vm.prank(stranger);
+        receiver.processOrder(settlement, instruction, MAX_RELAY_FEE);
+
+        assertEq(stranger.balance, MAX_RELAY_FEE, "after the window anyone may be paid");
+    }
+
+    /// @dev The instruction publishes at consistency 200 and the settlement at 202, so the
+    ///      instruction can be signed blocks earlier. Timing from it would hand outsiders a window
+    ///      that had already expired before the settlement a relayer waits on existed.
+    function testWindowIsTimedFromTheSettlementNotTheInstruction() public {
+        receiver.setAuthorizedRelayer(relayer, true);
+
+        // Instruction published first, then left to age past the window.
+        bytes memory instruction = _instruction(SEQUENCE, AMOUNT, MAX_RELAY_FEE);
+        vm.warp(block.timestamp + WINDOW + 1);
+
+        // Settlement published only now, so the order is still fresh.
+        bytes memory settlement = _settlement(SEQUENCE);
+
+        vm.prank(makeAddr("frontrunner"));
+        vm.expectRevert(IIntentReceiver.Unauthorized.selector);
+        receiver.processOrder(settlement, instruction, MAX_RELAY_FEE);
+    }
+
+    function testRevokingTheLastRelayerRestoresPermissionless() public {
+        receiver.setAuthorizedRelayer(relayer, true);
+        receiver.setAuthorizedRelayer(relayer, false);
+        assertEq(receiver.authorizedRelayerCount(), 0, "count must return to zero");
+
+        vm.prank(makeAddr("stranger"));
+        _redeem(SEQUENCE, 0);
+
+        assertEq(depositAddress.balance, AMOUNT, "revoking the last relayer reopens processing");
+    }
+
+    function testAuthorizingIsIdempotent() public {
+        receiver.setAuthorizedRelayer(relayer, true);
+        receiver.setAuthorizedRelayer(relayer, true);
+
+        assertEq(receiver.authorizedRelayerCount(), 1, "a repeated grant must not double-count");
+    }
+
     // ─── Admin ──────────────────────────────────────────────────────
 
     function testSweepRecoversStrayEth() public {
@@ -434,6 +521,9 @@ contract IntentReceiverTest is Test {
 
         vm.expectRevert(IIntentReceiver.NotOwner.selector);
         receiver.sweep(attacker, 0);
+
+        vm.expectRevert(IIntentReceiver.NotOwner.selector);
+        receiver.setAuthorizedRelayer(attacker, true);
         vm.stopPrank();
     }
 }

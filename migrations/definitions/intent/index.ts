@@ -14,6 +14,7 @@ import type { MigrationConfig } from "./types";
  *   003 set the WETH NttManager @emitter
  *   004 set the Ethereum IntentReceiver @emitter
  *   005 set the Hydration IntentEmitter @receiver
+ *   006 authorize relayer 1 @receiver — exclusive window on processOrder
  *
  * Both ends stay deployer-owned — ownership transfer lands as a later step, so this is not yet a
  * prod-ready end state.
