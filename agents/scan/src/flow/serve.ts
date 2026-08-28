@@ -6,6 +6,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 import { CHAINS, chainId } from "../chains";
 import { chainCursors, pool, readerState } from "../db";
+import { WATCH } from "../watch";
 import log from "../logger";
 import { port } from "../config";
 import type { Flow } from "../types";
@@ -62,19 +63,24 @@ export async function serve(opts: ServeOptions): Promise<FastifyInstance> {
   app.get("/api/health", async () => ({ ok: true }));
 
   app.get("/api/status", async () => {
+    // Every chain in the watch list, not just the ones this process has an endpoint for — a reader
+    // covers them all, and `rpc: false` is what says who is able to ingest.
+    const names = [...new Set(WATCH.map((w) => w.chain))];
     const chains = await Promise.all(
-      Object.values(CHAINS).map(async (c) => {
-        const w = opts.watchers?.find((x) => x.cfg.name === c.name);
+      names.map(async (name) => {
+        const c = CHAINS[name];
+        const w = opts.watchers?.find((x) => x.cfg.name === name);
         const [roles, safe] = await Promise.all([
-          chainCursors(c.name),
+          chainCursors(name),
           w ? w.latestSafe().catch(() => null) : Promise.resolve(null),
         ]);
         return [
-          c.name,
+          name,
           {
-            kind: c.kind,
-            chainId: chainId(c),
-            wormholeId: c.wormholeId,
+            rpc: Boolean(c),
+            kind: c?.kind ?? null,
+            chainId: c ? chainId(c) : null,
+            wormholeId: c?.wormholeId ?? null,
             safe: safe?.toString() ?? null,
             roles,
           },

@@ -9,10 +9,18 @@ export function rankFn(f: Flow): string {
  * The flow's DDL: its table, the rank function its states define, and its indexes. Idempotent, so a
  * process runs it at every boot.
  *
+ * `CREATE TABLE IF NOT EXISTS` alone would never add a column to a table that already exists, which
+ * would make adding a field to a flow silently do nothing. Every column is therefore also issued as
+ * an `ADD COLUMN IF NOT EXISTS`, so a flow definition is the schema rather than merely its initial
+ * shape. Populating a new column still needs the reader re-run over the events that fill it.
+ *
  * @param f The flow.
  */
 export function ddl(f: Flow): string {
   const cols = Object.entries(f.columns).map(([c, t]) => `  ${c} ${t}`);
+  const added = Object.entries(f.columns).map(
+    ([c, t]) => `ALTER TABLE ${f.table} ADD COLUMN IF NOT EXISTS ${c} ${t};`,
+  );
   const cases = Object.entries(f.states)
     .map(([s, rank]) => `    WHEN '${s}' THEN ${rank}`)
     .join("\n");
@@ -29,6 +37,8 @@ export function ddl(f: Flow): string {
     `${cols.join(",\n")},`,
     `  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
     `);`,
+    ``,
+    ...added,
     ``,
     ...unique,
     `CREATE INDEX IF NOT EXISTS idx_${f.table}_state ON ${f.table} (state);`,

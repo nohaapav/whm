@@ -54,6 +54,12 @@ Hydration must be read over substrate: the Basejump landing's deliveries are XCM
 `pallet_evm` calls with no ethereum receipt, so `eth_getLogs` cannot see them at all. Only Frontier
 `EVM.Log` events expose them.
 
+That has a consequence worth knowing. An `EVM.Log` never names its own transaction, so the hash
+comes from the `Ethereum.Executed` that Frontier emits *after* the logs of each ethereum call — the
+watcher buffers logs and assigns the hash when it arrives. The XCM-driven deliveries have no such
+event, and keep a `blockHash-eventIndex` identity instead, which is the only name they have. The UI
+links the first kind to `/extrinsic/<hash>` and the second to `/event/<block>-<index>`.
+
 ## Adding something to index
 
 Append a watch entry:

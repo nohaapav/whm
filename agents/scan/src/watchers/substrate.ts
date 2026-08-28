@@ -18,6 +18,10 @@ interface IndexedLog {
   address: string;
   topics: `0x${string}`[];
   data: `0x${string}`;
+  /** The ethereum transaction this log belongs to, where the call came in as one. */
+  txHash?: string;
+  /** Who sent that transaction. Free here, unlike on an EVM chain. */
+  sender?: string;
 }
 
 type Block = { number: bigint; hash: `0x${string}`; timestamp: number; logs: IndexedLog[] };
@@ -162,15 +166,17 @@ export class SubstrateWatcher {
         const events: RawEvent[] = block.logs
           .filter((l) => this.wanted(l, block.number, cursors))
           .map((l) => ({
-            // An EVM.Log is a substrate event, not an EVM transaction, so there is no tx hash to
-            // key on — the block hash plus the event index is the stable identity.
-            txHash: `${block.hash}-${l.index}`,
+            // The ethereum transaction where the call came in as one. Where it did not — the
+            // XCM-driven deliveries — there is no such transaction, and the block hash plus the
+            // event index is the only identity the log has.
+            txHash: l.txHash ?? `${block.hash}-${l.index}`,
             logIndex: l.index,
             address: l.address,
             blockNumber: block.number,
             blockTimestamp: block.timestamp,
             topics: l.topics,
             data: l.data,
+            sender: l.sender,
           }));
         const n = await insertEvents(this.cfg.name, events);
         if (n > 0) this.onIngest?.(this.cfg.name);
@@ -227,21 +233,45 @@ export class SubstrateWatcher {
   /**
    * Pull EVM.Log events emitted by any watched contract, tagging each with its address. In the
    * current descriptors `address`/`topics` are already hex strings and `data` is a Uint8Array.
+   *
+   * An `EVM.Log` never names its own transaction, so the hash comes from the `Ethereum.Executed`
+   * that follows the logs of each ethereum call — buffer the logs, and assign when it arrives.
+   *
+   * Not every log has one. The landing's deliveries are XCM-driven `pallet_evm` calls that produce
+   * no ethereum transaction at all — they sit in the `Finalization` phase with no `Executed` after
+   * them — and those are precisely why this chain is read over substrate rather than eth_getLogs.
+   * They keep the block-and-event identity instead, which is the only name they have.
    */
   private extractEvmLogs(records: RawRecord[]): IndexedLog[] {
     const out: IndexedLog[] = [];
+    let awaiting: IndexedLog[] = [];
+
     for (let i = 0; i < records.length; i++) {
       const evt = records[i].event;
+
+      if (evt.type === "Ethereum" && evt.value.type === "Executed") {
+        const { transaction_hash, from } = evt.value.value as EthereumExecuted;
+        for (const l of awaiting) {
+          l.txHash = transaction_hash;
+          l.sender = from;
+        }
+        awaiting = [];
+        continue;
+      }
+
       if (evt.type !== "EVM" || evt.value.type !== "Log") continue;
       const { log } = evt.value.value as EvmPayload;
       const address = (log.address as string).toLowerCase();
       if (!this.targets.has(address)) continue;
-      out.push({
+
+      const entry: IndexedLog = {
         index: i,
         address,
         topics: log.topics.map((t) => t as `0x${string}`),
         data: bytesToHex(log.data),
-      });
+      };
+      out.push(entry);
+      awaiting.push(entry);
     }
     return out;
   }
@@ -268,4 +298,11 @@ function topicsMatch(w: Watch, topics: `0x${string}`[]): boolean {
 
 type RawRecord = {
   event: { type: string; value: { type: string; value: unknown } };
+};
+
+/** Frontier's receipt for one ethereum call, emitted after the logs it covers. */
+type EthereumExecuted = {
+  from: string;
+  to: string;
+  transaction_hash: string;
 };

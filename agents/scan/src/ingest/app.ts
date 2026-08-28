@@ -5,7 +5,7 @@ import { initCore, notifyEvents } from "../db";
 import { Drain, serve } from "../flow";
 import log from "../logger";
 import type { Watch } from "../types";
-import { enabled } from "../watch";
+import { enabled, WATCH } from "../watch";
 import { EvmWatcher, SubstrateWatcher } from "../watchers";
 
 import { messages } from "./flows/messages";
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     log.info(`  chain: ${name} — ${watches.map((w) => `${w.role}@${w.from}`).join(", ")}`);
   }
 
-  const drain = new Drain(NAME, [messages, ntt], enabled);
+  const drain = new Drain(NAME, [messages, ntt], WATCH);
   await drain.initSchema();
 
   await serve({ name: NAME, flows: [messages, ntt], watchers });

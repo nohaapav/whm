@@ -74,7 +74,7 @@ export class Drain {
 
   async start(intervalMs: number): Promise<void> {
     if (this.chains.length === 0) {
-      log.warn(`[${this.name}] no chain enabled for any flow — nothing to drain`);
+      log.warn(`[${this.name}] no watch entry matches any flow's roles — nothing to drain`);
       return;
     }
     listenEvents(() => this.trigger());

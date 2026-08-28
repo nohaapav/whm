@@ -52,6 +52,7 @@ export class SettlementPoller {
 
   private async poll(r: {
     transfer_sequence: string;
+    state: string;
     deposit_address: string;
     settlement_status: string | null;
   }): Promise<void> {
@@ -62,12 +63,14 @@ export class SettlementPoller {
     // An unchanged non-terminal status is not news — writing it would churn the row and the stream.
     if (!terminal && exec.status === r.settlement_status) return;
 
+    // Short of a terminal answer this claims the state the row already has, never a later one. The
+    // chains decide when an order advances; 1Click only ever says how it ended.
     const applied = await reconcile(
       pool,
       orders,
       orders.key.column,
       r.transfer_sequence,
-      terminal ?? "processed",
+      terminal ?? r.state,
       {
         settlement_status: exec.status,
         dest_address: exec.destAddress,

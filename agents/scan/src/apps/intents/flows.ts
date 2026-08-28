@@ -1,6 +1,30 @@
+import { decodeAbiParameters } from "viem";
+
+import { LogMessagePublishedEvt } from "../../abi";
+import { CHAINS } from "../../chains";
+import { vaaId } from "../../ingest/vaa";
 import type { Flow, LogEvent } from "../../types";
+import { INTENT_EMITTER } from "../../watch";
 
 import { OrderPlacedEvt, OrderProcessedEvt, QuotePublishedEvt, RelayFeePaidEvt } from "./abi";
+
+/**
+ * The forwarding instruction the emitter publishes beside each settlement:
+ * `abi.encode(sequence, depositAddress, amount, maxRelayFee)`. NTT carries no payload of its own,
+ * so the destination travels separately and names the settlement it belongs to.
+ */
+const INSTRUCTION = [
+  { type: "uint64" },
+  { type: "address" },
+  { type: "uint256" },
+  { type: "uint256" },
+] as const;
+
+interface Published {
+  sender: `0x${string}`;
+  sequence: bigint;
+  payload: `0x${string}`;
+}
 
 interface Placed {
   transferSequence: bigint;
@@ -50,6 +74,14 @@ export const orders: Flow = {
   states: { placed: 0, processed: 1, settled: 2, refunded: 2, failed: 2 },
   requires: { processed: "placed" },
   columns: {
+    /**
+     * The emitter's own Wormhole sequence: intents and nothing else, counting from zero. The row is
+     * keyed on the NTT manager's sequence because that is what both contracts pair on, but that
+     * counter is shared with every other transfer of the same token — this is the one to show.
+     */
+    settlement_sequence: "BIGINT",
+    /** The instruction VAA that carries it. */
+    instruction_vaa: "TEXT",
     caller: "TEXT",
     deposit_address: "TEXT",
     asset_in: "BIGINT",
@@ -113,6 +145,30 @@ export const orders: Flow = {
       patch: (a: FeePaid) => ({
         relay_fee: a.fee.toString(),
         relayer: a.relayer.toLowerCase(),
+      }),
+    },
+    {
+      /**
+       * The forwarding instruction, for the sake of the sequence it was published under.
+       *
+       * The Wormhole core is shared, so this leg has to recognise its own emitter; and the
+       * instruction's first field is the settlement it belongs to, which is how it finds the row
+       * without needing the transaction it shared with `OrderPlaced`.
+       */
+      role: "wormhole-core",
+      abi: LogMessagePublishedEvt,
+      state: "placed",
+      key: (a: Published) => {
+        if (a.sender.toLowerCase() !== INTENT_EMITTER.toLowerCase()) return null;
+        try {
+          return decodeAbiParameters(INSTRUCTION, a.payload)[0].toString();
+        } catch {
+          return null; // not an instruction, whatever else the emitter may publish
+        }
+      },
+      patch: (a: Published, ev: LogEvent) => ({
+        settlement_sequence: a.sequence.toString(),
+        instruction_vaa: vaaId(CHAINS[ev.chain].wormholeId, a.sender, a.sequence),
       }),
     },
   ],

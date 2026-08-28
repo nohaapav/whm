@@ -89,15 +89,27 @@ export async function getOrder(sequence: string): Promise<OrderRow | null> {
 }
 
 /**
- * Orders whose on-chain leg is done but whose off-chain leg may not be — the settlement poller's
- * work set. A terminal state drops out of it, so polling stops on its own.
+ * Orders whose off-chain leg is not finished — the settlement poller's work set.
+ *
+ * `placed` is in it as well as `processed`, and deliberately: the deposit address derives from a
+ * quote that already names the destination asset, recipient and expected output, so all of that is
+ * knowable the moment the order exists rather than only once Ethereum has forwarded. Waiting for
+ * `processed` would leave an in-flight order showing no destination at all — which is exactly when
+ * someone is looking.
+ *
+ * A terminal state drops out of the set, so polling stops on its own.
  */
 export async function pendingSettlement(): Promise<
-  { transfer_sequence: string; deposit_address: string; settlement_status: string | null }[]
+  {
+    transfer_sequence: string;
+    state: string;
+    deposit_address: string;
+    settlement_status: string | null;
+  }[]
 > {
   const r = await pool.query(
-    `SELECT transfer_sequence, deposit_address, settlement_status FROM intent_orders
-      WHERE state = 'processed' AND deposit_address IS NOT NULL`,
+    `SELECT transfer_sequence, state, deposit_address, settlement_status FROM intent_orders
+      WHERE state IN ('placed', 'processed') AND deposit_address IS NOT NULL`,
   );
   return r.rows;
 }

@@ -1,7 +1,11 @@
 /*
- * Shared across every domain's pages. Tokens, type scale and layout primitives are lifted from the
- * Hydration explorer so the two read as one product; Geist comes from Google Fonts rather than the
- * explorer's own host, so nothing here depends on it staying up.
+ * Shared across every domain's pages.
+ *
+ * Tokens, spacing and the layout primitives are taken from the Hydration explorer so the two read
+ * as one product — the 1280/24 wrap, the 18px panel, the 220px key column, the pill nav. Geist
+ * comes from Google Fonts rather than the explorer's own host, so nothing here depends on it
+ * staying up. Gazpacho is not publicly distributed, so the wordmark falls back to a serif: still a
+ * wordmark, still distinct from the body face.
  */
 
 :root[data-theme="dark"] {
@@ -77,95 +81,129 @@ body {
   background: var(--bg);
   color: var(--text-high);
   font-family: Geist, system-ui, sans-serif;
-  font-size: 14px;
   line-height: 1.5;
 }
 
-.mono,
-code,
-td.mono,
-.addr,
-.num {
+.mono {
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-variant-numeric: tabular-nums;
 }
 
 a {
-  color: var(--sky);
+  color: inherit;
   text-decoration: none;
 }
 
-a:hover {
+a.link {
+  color: var(--sky);
+}
+
+a.link:hover {
   text-decoration: underline;
 }
 
 /* ─── Frame ─────────────────────────────────────────────────── */
 
+.wrap {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
 .topbar {
   position: sticky;
   top: 0;
   z-index: 50;
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 1.25rem;
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: blur(18px) saturate(140%);
   -webkit-backdrop-filter: blur(18px) saturate(140%);
   border-bottom: 1px solid var(--separator);
 }
 
-.topbar .brand {
+/* Brand, nav and the right-hand cluster, spaced by the row's own gap. */
+.topbar .wrap {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  gap: 20px;
+  min-width: 0;
+  height: 60px;
 }
 
-.logo {
-  width: 18px;
-  height: 18px;
+.brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-shrink: 0;
+}
+
+.brand .logo {
+  width: 22px;
+  height: 22px;
   color: var(--accent);
+  transform: translateY(3px);
   flex: none;
 }
 
-.topbar .brand .domain {
-  color: var(--text-low);
+/* The wordmark, as the explorer sets it. Gazpacho if the viewer happens to have it, serif if not. */
+.brand .wm {
+  font-family: Gazpacho, serif;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.brand .pr {
+  color: var(--accent);
+  font-family: Gazpacho, serif;
+  font-size: 18px;
+  font-style: italic;
   font-weight: 400;
 }
 
-.topbar nav {
+.nav {
   display: flex;
-  gap: 0.25rem;
-  margin-left: 0.75rem;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  min-width: 0;
 }
 
-.topbar nav a {
-  padding: 0.25rem 0.6rem;
+.nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 13px;
   border-radius: 9999px;
   color: var(--text-medium);
   font-size: 13px;
+  font-weight: 500;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
 
-.topbar nav a:hover {
+.nav a:hover {
+  color: var(--text-high);
   background: var(--panel-hover);
-  text-decoration: none;
 }
 
-.topbar nav a[aria-current="page"] {
-  background: var(--accent-soft);
+.nav a[aria-current="page"] {
   color: var(--accent);
+  background: var(--accent-soft);
 }
 
-.spacer {
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .conn {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 6px;
   color: var(--text-lowest);
   font-size: 12px;
 }
@@ -182,25 +220,48 @@ a:hover {
 }
 
 .theme {
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text-medium);
   border-radius: 9999px;
-  width: 28px;
-  height: 28px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
+  transition:
+    color 0.15s,
+    background 0.15s;
 }
 
 .theme:hover {
+  color: var(--text-high);
   background: var(--panel-hover);
 }
 
-main {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 1.5rem 1.25rem 4rem;
+main.wrap {
+  padding-top: 24px;
+  padding-bottom: 64px;
+}
+
+.page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 14px;
+  margin: 0 0 18px;
+  letter-spacing: 0;
+  font-family: Gazpacho, serif;
+  font-size: 34px;
+  font-weight: 500;
+}
+
+.page-title .sub {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-medium);
 }
 
 /* ─── Panels ────────────────────────────────────────────────── */
@@ -212,53 +273,34 @@ main {
   overflow: hidden;
 }
 
-.panel + .panel {
-  margin-top: 1rem;
+.panel:has(> .scroll) {
+  overflow-x: auto;
 }
 
-.panel > header {
+.panel + .panel,
+.legs + .panel,
+.panel + .legs {
+  margin-top: 14px;
+}
+
+.panel-head {
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.85rem 1.1rem;
+  gap: 12px;
+  padding: 16px 18px;
   border-bottom: 1px solid var(--separator);
-  font-size: 13px;
-  color: var(--text-medium);
 }
 
-.panel > header h2 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-high);
-}
-
-.stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-
-.stat {
-  flex: 1 1 8rem;
-  padding: 0.7rem 0.9rem;
-  background: var(--bg-elev);
-  border: 1px solid var(--separator);
-  border-radius: 14px;
-}
-
-.stat .k {
-  color: var(--text-low);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
-.stat .v {
-  font-family: "Geist Mono", ui-monospace, monospace;
-  font-size: 20px;
+.panel-head .t {
+  font-family: Gazpacho, serif;
+  font-size: 17px;
   font-weight: 500;
+}
+
+.panel-head .note {
+  color: var(--text-medium);
+  font-size: 12px;
 }
 
 /* ─── Tables ────────────────────────────────────────────────── */
@@ -267,72 +309,219 @@ main {
   overflow-x: auto;
 }
 
-table {
+.tbl {
   width: 100%;
+  min-width: 760px;
   border-collapse: collapse;
 }
 
-th {
-  padding: 0.55rem 1.1rem;
+.tbl th {
+  padding: 10px 18px;
   text-align: left;
-  font-size: 11px;
+  border-bottom: 1px solid var(--separator);
+  color: var(--text-low);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 10px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-low);
-  border-bottom: 1px solid var(--separator);
+  letter-spacing: 0.08em;
   white-space: nowrap;
 }
 
-td {
-  padding: 0.65rem 1.1rem;
+.tbl td {
+  padding: 11px 18px;
   border-bottom: 1px solid var(--separator);
+  font-size: 13px;
   white-space: nowrap;
 }
 
-tbody tr:last-child td {
-  border-bottom: none;
+.tbl tbody tr:last-child td {
+  border-bottom: 0;
 }
 
-tbody tr:hover {
+.tbl tbody tr.clickable {
+  cursor: pointer;
+}
+
+.tbl tbody tr:hover {
   background: var(--panel);
 }
 
-td.num {
+.tbl th.r,
+.tbl td.r {
   text-align: right;
 }
 
-.empty {
-  padding: 2rem 1rem;
+.tbl td.mono {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+
+.table-error {
+  padding: 32px 16px;
   text-align: center;
   color: var(--text-medium);
   font-size: 12px;
 }
 
-/* ─── Detail rows ───────────────────────────────────────────── */
-
-dl {
-  margin: 0;
-  padding: 0.4rem 0;
+/* Token and chain marks. Never load-bearing — a symbol always sits beside them, and a mark whose
+   registry entry is missing removes itself rather than leaving a broken image.
+   Spacing comes from the flex gap of whatever holds them, never a margin here. */
+.icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: contain;
+  flex: none;
+  vertical-align: middle;
 }
 
-dl div {
-  display: flex;
-  gap: 1rem;
-  padding: 0.45rem 1.1rem;
-  align-items: baseline;
+/* Wormhole's mark is a solid white glyph with no backdrop of its own, so it needs one to survive a
+   light panel. Same disc in both themes, so it reads the same either way. */
+.icon-wormhole {
+  background: #131d30;
+  padding: 2px;
 }
 
-dl dt {
-  flex: 0 0 11rem;
-  color: var(--text-low);
+/* The trade itself: what went in, what came out. */
+.assets {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.assets .arrow {
+  color: var(--text-lowest);
+}
+
+/* One asset: its mark, the amount, the symbol — centred on a single row. */
+.asset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  vertical-align: middle;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
 }
 
-dl dd {
-  margin: 0;
+.sym {
+  color: var(--text-medium);
+}
+
+/* ─── Key / value ───────────────────────────────────────────── */
+
+.kv-row {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  border-bottom: 1px solid var(--separator);
+}
+
+.kv-row:last-child {
+  border-bottom: 0;
+}
+
+.kv-row .kk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px;
+  color: var(--text-medium);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.kv-row .vv {
+  padding: 11px 16px;
+  color: var(--text-high);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* ─── Legs ──────────────────────────────────────────────────── */
+
+/*
+ * The route, start to end, one card per hop. Cards flow left to right so the shape of the journey
+ * is legible before any of the values are — a pending hop is dimmed rather than hidden, because
+ * where a transfer stopped is the thing worth seeing.
+ */
+.legs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px;
+}
+
+.leg {
+  position: relative;
+  background: var(--bg-elev);
+  border: 1px solid var(--separator);
+  border-radius: 18px;
+  padding: 14px 18px;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.leg.pending {
+  opacity: 0.5;
+}
+
+.leg.held {
+  border-color: var(--amber-soft);
+}
+
+.leg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.leg-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.leg-title .where {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.leg-kind {
+  color: var(--text-low);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.leg-kind.pending {
+  color: var(--amber);
+}
+
+.leg-body {
+  color: var(--text-medium);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.leg-body > div + div {
+  margin-top: 5px;
+}
+
+.leg-body .v {
+  color: var(--text-high);
+}
+
+.check {
+  color: var(--green);
+  font-size: 13px;
 }
 
 /* ─── Badges ────────────────────────────────────────────────── */
@@ -341,16 +530,16 @@ dl dd {
   display: inline-block;
   padding: 3px 9px;
   border-radius: 9999px;
+  background: var(--panel);
+  color: var(--text-medium);
   font-family: "Geist Mono", ui-monospace, monospace;
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   white-space: nowrap;
-  background: var(--panel);
-  color: var(--text-medium);
 }
 
-/* Lifecycle colouring, shared by every flow: in-flight is cool, done is green, held is amber. */
+/* Lifecycle colouring, shared by every flow: in flight is cool, done is green, held is amber. */
 .badge.placed,
 .badge.initiated,
 .badge.published {
@@ -393,13 +582,13 @@ dl dd {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.9rem;
+  gap: 8px;
+  margin-bottom: 14px;
 }
 
 input[type="search"],
 select {
-  padding: 0.4rem 0.7rem;
+  padding: 7px 13px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 9999px;
@@ -409,54 +598,138 @@ select {
 }
 
 input[type="search"] {
-  min-width: 22rem;
-  max-width: 100%;
+  flex: 1 1 22rem;
+  min-width: 0;
   font-family: "Geist Mono", ui-monospace, monospace;
 }
 
 input[type="search"]:focus,
 select:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--sky);
 }
 
-button.page {
-  padding: 0.35rem 0.8rem;
-  background: var(--panel);
+.pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--separator);
+}
+
+.pager .btns {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.pager button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border: 1px solid var(--border);
-  border-radius: 9999px;
+  background: var(--panel);
   color: var(--text-medium);
+  border-radius: 9px;
+  cursor: pointer;
   font-family: inherit;
   font-size: 13px;
-  cursor: pointer;
 }
 
-button.page:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-button.page:not(:disabled):hover {
+.pager button:hover:not(:disabled) {
+  color: var(--text-high);
   background: var(--panel-hover);
 }
 
+.pager button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pager .count {
+  color: var(--text-medium);
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 12px;
+}
+
 .muted {
-  color: var(--text-low);
+  color: var(--text-medium);
 }
 
 .dim {
   color: var(--text-lowest);
 }
 
+/* ─── Narrow ────────────────────────────────────────────────── */
+
 @media (max-width: 720px) {
-  dl div {
-    display: block;
+  .wrap {
+    padding: 0 16px;
   }
-  dl dt {
-    margin-bottom: 0.15rem;
+
+  main.wrap {
+    padding: 16px 16px 48px;
   }
-  input[type="search"] {
+}
+
+@media (max-width: 640px) {
+  .page-title {
+    font-size: 27px;
+  }
+}
+
+@media (max-width: 860px) {
+  .topbar .wrap {
+    gap: 10px;
+  }
+
+  /* The explorer's pattern: drop the header row and label each cell from its own data-label. */
+  .tbl {
     min-width: 0;
-    width: 100%;
+  }
+
+  .tbl thead {
+    display: none;
+  }
+
+  .tbl tbody td {
+    display: block;
+    text-align: right;
+    white-space: normal;
+    border-bottom: 0;
+    padding: 5px 16px;
+  }
+
+  .tbl tbody tr {
+    display: block;
+    border-bottom: 1px solid var(--separator);
+    padding: 8px 0;
+  }
+
+  .tbl tbody td[data-label]:before {
+    content: attr(data-label);
+    float: left;
+    margin-right: 14px;
+    color: var(--text-low);
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    line-height: 1.85;
+  }
+
+  .kv-row {
+    grid-template-columns: 1fr;
+  }
+
+  .kv-row .kk {
+    padding-bottom: 0;
+  }
+
+  .legs {
+    grid-template-columns: 1fr;
   }
 }

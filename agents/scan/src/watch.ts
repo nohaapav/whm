@@ -26,7 +26,12 @@ const WORMHOLE_CORE_HYDRATION = "0x3792a6d63c31941B2805181771795D9176fA82A1";
 export const WETH_TRANSCEIVER_HYDRATION = "0x8acce9CA511d5D7213F8C3f813B8916087cd00ae";
 export const WETH_MANAGER_HYDRATION = "0xb5cef790d52a57fa619ed96edd64c5328f3dcfb7";
 
-const INTENT_EMITTER = "0x98f1ebC9dcC8Ab7bA54D83C98500e9e313F793f2";
+/**
+ * Its Wormhole messages are the forwarding instructions, and its emitter sequence counts intents
+ * alone, from zero — unlike the NTT manager's, which every corridor riding that token shares.
+ */
+export const INTENT_EMITTER = "0x98f1ebC9dcC8Ab7bA54D83C98500e9e313F793f2";
+
 const INTENT_QUOTE_EMITTER: `0x${string}`[] = [];
 
 /** Basejump landing. Several independent deployments merge into one view, so this is a list. */

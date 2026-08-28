@@ -2,12 +2,16 @@
 <html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Intents · scan</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Hydration intents</title>
     <script>
       try {
         var t = localStorage.getItem("explorer-theme");
-        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+        if (t === "light" || t === "dark")
+          document.documentElement.setAttribute("data-theme", t);
       } catch (e) {}
     </script>
     <link
@@ -17,22 +21,15 @@
     <link rel="stylesheet" href="/shared/style.css" />
   </head>
   <body>
-    <div class="topbar">
-      <span class="brand"><svg class="logo" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M18.0532 11.3604C18.2827 11.1319 18.5778 10.8381 18.8718 10.5463C19.5265 9.89543 19.5265 8.83853 18.8718 8.18664L18.1782 7.49598C15.6959 9.96786 11.982 10.4637 9.00484 8.98646C11.017 9.35678 13.1028 9.06807 14.951 8.0785C16.1876 7.41641 16.4222 5.74741 15.4295 4.75886L11.3366 0.683262C10.4217 -0.227754 8.93928 -0.227754 8.02542 0.683262L3.61392 5.07613C6.51941 3.84682 10.0089 4.4171 12.3714 6.78594C8.76716 5.04349 4.30136 5.66171 1.3088 8.64164C1.07931 8.87016 0.78323 9.16499 0.490223 9.45676C-0.163408 10.1086 -0.163408 11.1645 0.490223 11.8154L1.18279 12.505C3.66515 10.0332 7.37896 9.53735 10.3562 11.0146C8.34404 10.6442 6.25816 10.933 4.40996 11.9225C3.17339 12.5846 2.93878 14.2536 3.93152 15.2422L8.0244 19.3178C8.93928 20.2288 10.4217 20.2288 11.3356 19.3178L15.7471 14.9249C12.8416 16.1542 9.35215 15.5839 6.98965 13.2151C10.5938 14.9575 15.0596 14.3393 18.0522 11.3594L18.0532 11.3604Z"></path></svg>scan <span class="domain">/ intents</span></span>
-      <nav>
-        <a href="/" aria-current="page">Orders</a>
-        <a href="/quotes">Quotes</a>
-      </nav>
-      <span class="spacer"></span>
-      <span class="conn"><span class="dot"></span><span class="label">connecting</span></span>
-      <button class="theme" type="button" title="Toggle theme"></button>
-    </div>
-
-    <main>
-      <div class="stats" id="stats"></div>
+    <main class="wrap">
+      <h1 class="page-title">Orders <span class="sub" id="subtitle"></span></h1>
 
       <div class="bar">
-        <input type="search" id="q" placeholder="caller, deposit address, or destination recipient" />
+        <input
+          type="search"
+          id="q"
+          placeholder="caller, deposit address, or destination recipient"
+        />
         <select id="state">
           <option value="">any state</option>
           <option value="placed">placed</option>
@@ -41,42 +38,57 @@
           <option value="refunded">refunded</option>
           <option value="failed">failed</option>
         </select>
-        <span class="spacer"></span>
-        <span class="muted" id="count"></span>
-        <button class="page" id="prev" type="button">←</button>
-        <button class="page" id="next" type="button">→</button>
       </div>
 
       <div class="panel">
         <div class="scroll">
-          <table>
+          <table class="tbl">
             <thead>
               <tr>
-                <th>Seq</th>
-                <th>State</th>
-                <th>Rail</th>
-                <th>Caller</th>
-                <th class="num">In</th>
-                <th class="num">Out</th>
-                <th class="num">Relay fee</th>
-                <th>Destination</th>
-                <th class="num">Age</th>
+                <th>#</th>
+                <th>Time</th>
+                <th>From</th>
+                <th>To</th>
+                <th>Assets</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody id="rows">
               <tr>
-                <td class="empty" colspan="9">loading…</td>
+                <td class="table-error" colspan="6">loading…</td>
               </tr>
             </tbody>
           </table>
+        </div>
+        <div class="pager">
+          <span class="count" id="count"></span>
+          <div class="btns">
+            <button id="prev" type="button" title="Newer">←</button>
+            <button id="next" type="button" title="Older">→</button>
+          </div>
         </div>
       </div>
     </main>
 
     <script type="module">
-      import { ago, amount, at, badge, esc, json, live, short, theme } from "/shared/app.js";
+      import {
+        addrLink,
+        ago,
+        asset,
+        assetIcon,
+        chainIcon,
+        at,
+        badge,
+        esc,
+        json,
+        live,
+        topbar,
+      } from "/shared/app.js";
 
-      theme.init();
+      topbar("intents", [
+        ["/", "Orders"],
+        ["/quotes", "Quotes"],
+      ]);
 
       const LIMIT = 50;
       let offset = 0;
@@ -84,52 +96,75 @@
 
       const el = (id) => document.getElementById(id);
 
-      /** Format the Hydration asset the caller sold, with its symbol when we know it. */
-      function assetIn(row) {
-        const meta = tokens.hydration[row.asset_in];
-        const value = amount(row.amount_in, meta?.decimals ?? 12, 4);
-        return `${value} <span class="dim">${esc(meta?.symbol ?? `#${row.asset_in ?? "?"}`)}</span>`;
-      }
+      /**
+       * Which chain the user's asset actually landed on, per 1Click's token list. Whatever the
+       * quote named — there is no default, so an asset we have no metadata for links nowhere
+       * rather than being guessed at.
+       */
+      const destChain = (r) => tokens.dest[r.dest_asset]?.chain ?? null;
 
-      /** Where it lands: 1Click's destination leg, once it knows one. */
-      function destination(row) {
-        if (!row.dest_address) return '<span class="dim">—</span>';
-        const meta = tokens.dest[row.dest_asset];
-        const value = row.dest_amount ? amount(row.dest_amount, meta?.decimals ?? 0, 4) : "";
-        const label = meta ? `${value} ${esc(meta.symbol)}` : esc(row.dest_asset ?? "");
-        return `<span class="mono">${esc(short(row.dest_address, 8, 6))}</span> <span class="dim">${label}</span>`;
+      /**
+       * What the order actually did.
+       *
+       * The user sold an asset on Hydration and received one somewhere else entirely — ETH is only
+       * the rail in between, so it does not belong in this column. Until 1Click reports the
+       * destination there is nothing to show on the right.
+       */
+      function assets(r) {
+        const inSide = asset(
+          r.amount_in,
+          tokens.hydration[r.asset_in],
+          `#${r.asset_in ?? "?"}`,
+          assetIcon(r.asset_in),
+        );
+        const out = r.dest_amount
+          ? asset(
+              r.dest_amount,
+              tokens.dest[r.dest_asset],
+              r.dest_asset ?? "",
+              chainIcon(destChain(r)),
+            )
+          : '<span class="dim">pending</span>';
+        return `<span class="assets">${inSide}<span class="arrow">→</span>${out}</span>`;
       }
 
       /**
-       * The NTT rail underneath the order. `queued` is the one worth shouting about — the inbound
-       * rate limiter is holding the settlement and nothing has been credited.
+       * The order's state, plus the rail's when the rail is what is holding things up. `queued`
+       * means the destination rate limiter has the settlement and nothing has been credited.
        */
-      function rail(row) {
-        return row.rail_state ? badge(row.rail_state) : '<span class="dim">—</span>';
+      function status(r) {
+        const rail = r.rail_state === "queued" ? ` ${badge("queued")}` : "";
+        return `${badge(r.state)}${rail}`;
       }
 
       function render(items) {
         if (!items.length) {
-          el("rows").innerHTML = '<tr><td class="empty" colspan="9">no orders</td></tr>';
+          el("rows").innerHTML =
+            '<tr><td class="table-error" colspan="6">no orders</td></tr>';
           return;
         }
         el("rows").innerHTML = items
           .map((r) => {
             const ts = r.placed?.blockTimestamp;
-            return `<tr>
-              <td class="mono"><a href="/orders/${esc(r.transfer_sequence)}">${esc(r.transfer_sequence)}</a></td>
-              <td>${badge(r.state)}</td>
-              <td>${rail(r)}</td>
-              <td class="mono">${esc(short(r.caller, 6, 4))}</td>
-              <td class="num">${assetIn(r)}</td>
-              <td class="num mono">${amount(r.eth_out, 18, 6)} <span class="dim">ETH</span></td>
-              <td class="num mono">${r.relay_fee ? amount(r.relay_fee, 18, 6) : '<span class="dim">—</span>'}</td>
-              <td>${destination(r)}</td>
-              <td class="num dim" title="${at(ts)}">${ago(ts)}</td>
+            const href = `/orders/${encodeURIComponent(r.transfer_sequence)}`;
+            return `<tr class="clickable" data-href="${href}">
+              <td class="mono" data-label="#"><a class="link" href="${href}">${esc(r.settlement_sequence ?? "—")}</a></td>
+              <td data-label="Time" title="${at(ts)}">${ago(ts)}</td>
+              <td class="mono" data-label="From">${addrLink(r.caller, "hydration")}</td>
+              <td class="mono" data-label="To">${addrLink(r.dest_address, destChain(r))}</td>
+              <td data-label="Assets">${assets(r)}</td>
+              <td data-label="Status">${status(r)}</td>
             </tr>`;
           })
           .join("");
       }
+
+      // Whole-row navigation, except where a real link was clicked.
+      el("rows").addEventListener("click", (e) => {
+        if (e.target.closest("a")) return;
+        const href = e.target.closest("tr")?.dataset.href;
+        if (href) location.href = href;
+      });
 
       async function load() {
         const params = new URLSearchParams({ limit: LIMIT, offset });
@@ -138,21 +173,26 @@
         if (q) params.set("address", q);
         if (state) params.set("state", state);
 
-        const data = (await json(`/api/orders?${params}`)) ?? { items: [], total: 0 };
+        const data = (await json(`/api/orders?${params}`)) ?? {
+          items: [],
+          total: 0,
+        };
         render(data.items);
         const from = data.total ? offset + 1 : 0;
-        el("count").textContent = `${from}–${Math.min(offset + LIMIT, data.total)} of ${data.total}`;
+        el("count").textContent =
+          `${from}–${Math.min(offset + LIMIT, data.total)} of ${data.total}`;
         el("prev").disabled = offset === 0;
         el("next").disabled = offset + LIMIT >= data.total;
       }
 
-      async function loadStats() {
+      async function loadSummary() {
         const s = await json("/api/status");
         if (!s) return;
         const counts = s.flows?.orders ?? {};
-        el("stats").innerHTML = Object.entries(counts)
-          .map(([k, v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`)
-          .join("");
+        el("subtitle").textContent = Object.entries(counts)
+          .filter(([, n]) => n > 0)
+          .map(([k, n]) => `${n} ${k}`)
+          .join(" · ");
       }
 
       el("prev").onclick = () => {
@@ -177,18 +217,25 @@
       };
 
       // A change anywhere reloads the visible page rather than patching one row — the list is
-      // small, ordered by update time, and a stale neighbour is worse than a redraw.
-      live("orders", () => {
-        if (offset === 0) load();
-        loadStats();
-      });
+      // small, ordered by when the order was placed, and a stale neighbour is worse than a redraw.
+      live(
+        "orders",
+        () => {
+          if (offset === 0) load();
+          loadSummary();
+        },
+        () => {
+          load();
+          loadSummary();
+        },
+      );
 
       json("/api/tokens").then((t) => {
         if (t) tokens = t;
         load();
       });
-      loadStats();
-      setInterval(loadStats, 15000);
+      loadSummary();
+      setInterval(loadSummary, 15000);
     </script>
   </body>
 </html>

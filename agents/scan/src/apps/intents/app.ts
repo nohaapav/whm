@@ -2,7 +2,7 @@ import { banner } from "../../banner";
 import { drainIntervalMs } from "../../config";
 import { Drain, serve, subscribe } from "../../flow";
 import log from "../../logger";
-import { enabled } from "../../watch";
+import { WATCH } from "../../watch";
 
 import { routes } from "./api";
 import { orders, quotes } from "./flows";
@@ -22,7 +22,7 @@ const FLOWS = [orders, quotes];
 async function main(): Promise<void> {
   banner(NAME);
 
-  const drain = new Drain(NAME, FLOWS, enabled);
+  const drain = new Drain(NAME, FLOWS, WATCH);
   await drain.initSchema();
 
   subscribe((u) => {

@@ -2,12 +2,16 @@
 <html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Transfer · scan</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Transfer · Hydration basejump</title>
     <script>
       try {
         var t = localStorage.getItem("explorer-theme");
-        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+        if (t === "light" || t === "dark")
+          document.documentElement.setAttribute("data-theme", t);
       } catch (e) {}
     </script>
     <link
@@ -17,89 +21,146 @@
     <link rel="stylesheet" href="/shared/style.css" />
   </head>
   <body>
-    <div class="topbar">
-      <span class="brand"><svg class="logo" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M18.0532 11.3604C18.2827 11.1319 18.5778 10.8381 18.8718 10.5463C19.5265 9.89543 19.5265 8.83853 18.8718 8.18664L18.1782 7.49598C15.6959 9.96786 11.982 10.4637 9.00484 8.98646C11.017 9.35678 13.1028 9.06807 14.951 8.0785C16.1876 7.41641 16.4222 5.74741 15.4295 4.75886L11.3366 0.683262C10.4217 -0.227754 8.93928 -0.227754 8.02542 0.683262L3.61392 5.07613C6.51941 3.84682 10.0089 4.4171 12.3714 6.78594C8.76716 5.04349 4.30136 5.66171 1.3088 8.64164C1.07931 8.87016 0.78323 9.16499 0.490223 9.45676C-0.163408 10.1086 -0.163408 11.1645 0.490223 11.8154L1.18279 12.505C3.66515 10.0332 7.37896 9.53735 10.3562 11.0146C8.34404 10.6442 6.25816 10.933 4.40996 11.9225C3.17339 12.5846 2.93878 14.2536 3.93152 15.2422L8.0244 19.3178C8.93928 20.2288 10.4217 20.2288 11.3356 19.3178L15.7471 14.9249C12.8416 16.1542 9.35215 15.5839 6.98965 13.2151C10.5938 14.9575 15.0596 14.3393 18.0522 11.3594L18.0532 11.3604Z"></path></svg>scan <span class="domain">/ basejump</span></span>
-      <span class="spacer"></span>
-      <span class="conn"><span class="dot"></span><span class="label">connecting</span></span>
-      <button class="theme" type="button" title="Toggle theme"></button>
-    </div>
-
-    <main id="main">
-      <div class="panel"><div class="empty">loading…</div></div>
+    <main class="wrap" id="main">
+      <div class="panel"><div class="table-error">loading…</div></div>
     </main>
 
     <script type="module">
-      import { ago, amount, at, badge, esc, json, live, theme, txLink } from "/shared/app.js";
+      import {
+        addrLink,
+        amount,
+        badge,
+        esc,
+        json,
+        kv,
+        legCard,
+        live,
+        topbar,
+      } from "/shared/app.js";
 
-      theme.init();
+      topbar("basejump");
 
       // Also answers the bare `/transfers`, which has nothing to show — the list is the root.
       const id = decodeURIComponent(location.pathname.split("/")[2] ?? "");
       if (!id) location.replace("/");
 
-      const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
-      const mono = (v) => (v ? `<span class="mono">${esc(v)}</span>` : '<span class="dim">—</span>');
+      const main = document.getElementById("main");
+      const mono = (v) => (v ? esc(v) : '<span class="dim">—</span>');
 
-      function leg(name, ref) {
-        if (!ref) return row(name, '<span class="dim">—</span>');
-        return row(
-          name,
-          `${txLink(ref)} <span class="dim" title="${at(ref.blockTimestamp)}">· ${ago(ref.blockTimestamp)} ago · block ${esc(ref.blockNumber)}</span>`,
-        );
+      /**
+       * The route, start to end.
+       *
+       * The fast path is the point: the payout leaves the landing pool long before the settlement
+       * that replenishes it arrives, and the fee is what buys that head start. A shortfall turns
+       * the middle hop into a queue, which is where a transfer visibly stalls.
+       */
+      function route(t) {
+        const startedAt = t.initiated?.blockTimestamp;
+        const wasQueued = !!t.queued;
+        return [
+          legCard({
+            where: t.source_chain ?? "source",
+            kind: "initiated",
+            ref: t.initiated,
+            rows: [
+              [
+                "",
+                `<span class="mono">${amount(t.gross_amount, 18, 6)}</span>`,
+              ],
+            ],
+          }),
+          wasQueued
+            ? legCard({
+                where: t.dest_chain ?? "hydration",
+                kind: "queued",
+                ref: t.queued,
+                held: !t.fulfilled,
+                rows: [["", '<span class="dim">landing pool was short</span>']],
+                since: startedAt,
+              })
+            : legCard({
+                where: t.dest_chain ?? "hydration",
+                kind: "paid out",
+                ref: t.completed,
+                rows: [
+                  [
+                    "",
+                    `<span class="mono">${amount(t.net_amount, 18, 6)}</span>`,
+                  ],
+                ],
+                since: startedAt,
+              }),
+          wasQueued
+            ? legCard({
+                where: t.dest_chain ?? "hydration",
+                kind: "fulfilled",
+                ref: t.fulfilled,
+                rows: [
+                  [
+                    "",
+                    `<span class="mono">${amount(t.net_amount, 18, 6)}</span>`,
+                  ],
+                ],
+                since: startedAt,
+              })
+            : "",
+        ]
+          .filter(Boolean)
+          .join("");
       }
 
       function render(t) {
         if (!t) {
-          document.getElementById("main").innerHTML =
-            `<div class="panel"><div class="empty">no transfer ${esc(id)}</div></div>`;
+          main.innerHTML = `<div class="panel"><div class="table-error">no transfer ${esc(id)}</div></div>`;
           return;
         }
 
         const detail = [
-          row("State", badge(t.state)),
-          row("Id", mono(t.id)),
-          row("Route", `<span class="dim">${esc(t.source_chain ?? "?")} →</span> ${esc(t.dest_chain ?? "…")}`),
-          row("Sender", mono(t.sender)),
-          row("Recipient", mono(t.recipient)),
-          row("Source asset", mono(t.source_asset)),
-          row("Destination asset", mono(t.dest_asset)),
+          kv(
+            "route",
+            `<span class="dim">${esc(t.source_chain ?? "?")} →</span> ${esc(t.dest_chain ?? "…")}`,
+          ),
+          kv("sender", addrLink(t.sender, t.source_chain)),
+          kv("recipient", addrLink(t.recipient, t.dest_chain)),
+          kv("source asset", addrLink(t.source_asset, t.source_chain)),
+          kv("destination asset", addrLink(t.dest_asset, t.dest_chain)),
+          kv("id", mono(t.id)),
         ].join("");
 
         // Gross is what left the source; the fee buys the head start, and the rest is paid out of
-        // the landing pool before the settlement that replenishes it has arrived.
+        // the landing pool before the settlement replenishing it has arrived.
         const amounts = [
-          row("Gross", `<span class="mono">${amount(t.gross_amount, 18, 8)}</span>`),
-          row("Fee", `<span class="mono">${amount(t.fee, 18, 8)}</span>`),
-          row("Paid out", `<span class="mono">${amount(t.net_amount, 18, 8)}</span>`),
+          kv(
+            "gross",
+            `<span class="mono">${amount(t.gross_amount, 18, 8)}</span>`,
+          ),
+          kv("fee", `<span class="mono">${amount(t.fee, 18, 8)}</span>`),
+          kv(
+            "paid out",
+            `<span class="mono">${amount(t.net_amount, 18, 8)}</span>`,
+          ),
         ].join("");
 
         const settlement = [
-          row("NTT sequence", mono(t.transfer_sequence)),
-          row("Message sequence", mono(t.message_sequence)),
-          row("Pending queue id", mono(t.pending_id)),
+          kv("ntt sequence", mono(t.transfer_sequence)),
+          kv("message sequence", mono(t.message_sequence)),
+          kv("pending queue id", mono(t.pending_id)),
         ].join("");
 
-        document.getElementById("main").innerHTML = `
+        main.innerHTML = `
+          <h1 class="page-title">Transfer <span class="sub">${badge(t.state)}</span></h1>
+          <div class="legs">${route(t)}</div>
           <div class="panel">
-            <header><h2>Transfer</h2>${badge(t.state)}</header>
-            <dl>${detail}</dl>
+            <div class="panel-head"><span class="t">Transfer</span></div>
+            ${detail}
           </div>
           <div class="panel">
-            <header><h2>Amounts</h2></header>
-            <dl>${amounts}</dl>
+            <div class="panel-head"><span class="t">Amounts</span><span class="note">paid out ahead of settlement</span></div>
+            ${amounts}
           </div>
           <div class="panel">
-            <header><h2>Legs</h2></header>
-            <dl>
-              ${leg("Initiated", t.initiated)}
-              ${leg("Paid out", t.completed)}
-              ${leg("Queued on shortfall", t.queued)}
-              ${leg("Fulfilled", t.fulfilled)}
-            </dl>
-          </div>
-          <div class="panel">
-            <header><h2>Settlement</h2></header>
-            <dl>${settlement}</dl>
+            <div class="panel-head"><span class="t">Settlement</span></div>
+            ${settlement}
           </div>`;
       }
 
@@ -107,9 +168,13 @@
         render(await json(`/api/transfers/${encodeURIComponent(id)}`));
       }
 
-      live("transfers", (u) => {
-        if (u.record?.id === id) load();
-      });
+      live(
+        "transfers",
+        (u) => {
+          if (u.record?.id === id) load();
+        },
+        load,
+      );
       load();
     </script>
   </body>

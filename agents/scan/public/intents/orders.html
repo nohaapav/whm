@@ -2,12 +2,16 @@
 <html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Order · scan</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Order · Hydration intents</title>
     <script>
       try {
         var t = localStorage.getItem("explorer-theme");
-        if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+        if (t === "light" || t === "dark")
+          document.documentElement.setAttribute("data-theme", t);
       } catch (e) {}
     </script>
     <link
@@ -17,48 +21,152 @@
     <link rel="stylesheet" href="/shared/style.css" />
   </head>
   <body>
-    <div class="topbar">
-      <span class="brand"><svg class="logo" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M18.0532 11.3604C18.2827 11.1319 18.5778 10.8381 18.8718 10.5463C19.5265 9.89543 19.5265 8.83853 18.8718 8.18664L18.1782 7.49598C15.6959 9.96786 11.982 10.4637 9.00484 8.98646C11.017 9.35678 13.1028 9.06807 14.951 8.0785C16.1876 7.41641 16.4222 5.74741 15.4295 4.75886L11.3366 0.683262C10.4217 -0.227754 8.93928 -0.227754 8.02542 0.683262L3.61392 5.07613C6.51941 3.84682 10.0089 4.4171 12.3714 6.78594C8.76716 5.04349 4.30136 5.66171 1.3088 8.64164C1.07931 8.87016 0.78323 9.16499 0.490223 9.45676C-0.163408 10.1086 -0.163408 11.1645 0.490223 11.8154L1.18279 12.505C3.66515 10.0332 7.37896 9.53735 10.3562 11.0146C8.34404 10.6442 6.25816 10.933 4.40996 11.9225C3.17339 12.5846 2.93878 14.2536 3.93152 15.2422L8.0244 19.3178C8.93928 20.2288 10.4217 20.2288 11.3356 19.3178L15.7471 14.9249C12.8416 16.1542 9.35215 15.5839 6.98965 13.2151C10.5938 14.9575 15.0596 14.3393 18.0522 11.3594L18.0532 11.3604Z"></path></svg>scan <span class="domain">/ intents</span></span>
-      <nav>
-        <a href="/" aria-current="page">Orders</a>
-        <a href="/quotes">Quotes</a>
-      </nav>
-      <span class="spacer"></span>
-      <span class="conn"><span class="dot"></span><span class="label">connecting</span></span>
-      <button class="theme" type="button" title="Toggle theme"></button>
-    </div>
-
-    <main id="main">
-      <div class="panel"><div class="empty">loading…</div></div>
+    <main class="wrap" id="main">
+      <div class="panel"><div class="table-error">loading…</div></div>
     </main>
 
     <script type="module">
-      import { ago, amount, at, badge, esc, json, live, theme, txLink, vaaLink } from "/shared/app.js";
+      import {
+        addrLink,
+        asset,
+        assetIcon,
+        chainIcon,
+        badge,
+        destTxLink,
+        esc,
+        json,
+        kv,
+        legCard,
+        live,
+        nearIntentsUrl,
+        short,
+        topbar,
+        vaaLink,
+      } from "/shared/app.js";
 
-      theme.init();
+      topbar("intents", [
+        ["/", "Orders"],
+        ["/quotes", "Quotes"],
+      ]);
 
-      // This page also answers the bare `/orders`, which has nothing to show — the list is the root.
-      const sequence = decodeURIComponent(location.pathname.split("/")[2] ?? "");
+      // Also answers the bare `/orders`, which has nothing to show — the list is the root.
+      const sequence = decodeURIComponent(
+        location.pathname.split("/")[2] ?? "",
+      );
       if (!sequence) location.replace("/");
 
+      const main = document.getElementById("main");
       let tokens = { hydration: {}, dest: {} };
 
-      const row = (k, v) => `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`;
-      const mono = (v) => (v ? `<span class="mono">${esc(v)}</span>` : '<span class="dim">—</span>');
+      /** Whatever the quote named. No default — an unknown destination links nowhere. */
+      const destChain = (o) => tokens.dest[o.dest_asset]?.chain ?? null;
+      const mono = (v) => (v ? esc(v) : '<span class="dim">—</span>');
 
-      /** One leg's time and transaction, or a dash where it has not happened. */
-      function leg(name, ref) {
-        if (!ref) return row(name, '<span class="dim">—</span>');
-        return row(
-          name,
-          `${txLink(ref)} <span class="dim" title="${at(ref.blockTimestamp)}">· ${ago(ref.blockTimestamp)} ago · block ${esc(ref.blockNumber)}</span>`,
-        );
+      /** The rail's own unit. Not the destination asset — that comes from the quote. */
+      const ETH = { symbol: "ETH", decimals: 18 };
+
+      /**
+       * The route, start to end.
+       *
+       * Five hops, and every one of them is somewhere the transfer can stop: the order is placed on
+       * Hydration, the settlement is published as a VAA, delivered on Ethereum, forwarded to the
+       * deposit address, and only then is the user paid on whichever chain the quote named — NEAR,
+       * Zcash, Bitcoin, anything 1Click supports. Nothing on any chain indexed here reports that
+       * last hop; it comes from 1Click alone.
+       */
+      function route(o) {
+        const placedAt = o.placed?.blockTimestamp;
+        const inMeta = tokens.hydration[o.asset_in];
+        const destMeta = tokens.dest[o.dest_asset];
+        const chain = destChain(o);
+        const where = chain ?? "destination";
+
+        const held = o.rail_state === "queued";
+        const done = o.state === "settled";
+        const failed = o.state === "failed" || o.state === "refunded";
+
+        const destTx = destTxLink(o.dest_tx, o.dest_tx_url, chain);
+        const destRows = [
+          o.dest_amount
+            ? [
+                "",
+                asset(
+                  o.dest_amount,
+                  destMeta,
+                  o.dest_asset ?? "",
+                  chainIcon(chain ?? destChain(o)),
+                ),
+              ]
+            : null,
+          destTx ? ["tx", destTx] : null,
+          o.deposit_address
+            ? [
+                "",
+                `<a class="link" href="${nearIntentsUrl(o.deposit_address)}" target="_blank" rel="noreferrer">1Click execution ↗</a>`,
+              ]
+            : null,
+        ].filter(Boolean);
+
+        return [
+          legCard({
+            where: "hydration",
+            kind: "placed",
+            ref: o.placed,
+            rows: [
+              [
+                "",
+                `sold ${asset(o.amount_in, inMeta, `#${o.asset_in ?? "?"}`, assetIcon(o.asset_in))}`,
+              ],
+            ],
+          }),
+          legCard({
+            where: "wormhole",
+            kind: "published",
+            ref: o.rail_published,
+            rows: o.vaa_id ? [["vaa", vaaLink(o.vaa_id)]] : [],
+            since: placedAt,
+          }),
+          legCard({
+            where: "ethereum",
+            kind: held ? "rate limited" : "delivered",
+            ref: o.rail_settled,
+            held,
+            rows: held
+              ? [
+                  [
+                    "",
+                    '<span class="dim">held by the inbound rate limiter</span>',
+                  ],
+                ]
+              : [],
+            since: placedAt,
+          }),
+          legCard({
+            where: "ethereum",
+            kind: "forwarded",
+            ref: o.processed,
+            rows: o.forwarded_amount
+              ? [["", asset(o.forwarded_amount, ETH)]]
+              : [],
+            since: placedAt,
+          }),
+          legCard({
+            where,
+            kind: failed
+              ? o.state
+              : done
+                ? "received"
+                : (o.settlement_status ?? "pending"),
+            pending: !done && !failed,
+            rows: destRows,
+            since: placedAt,
+          }),
+        ].join("");
       }
 
       function render(o) {
         if (!o) {
-          document.getElementById("main").innerHTML =
-            `<div class="panel"><div class="empty">no order with sequence ${esc(sequence)}</div></div>`;
+          main.innerHTML = `<div class="panel"><div class="table-error">no order with sequence ${esc(sequence)}</div></div>`;
           return;
         }
 
@@ -66,68 +174,83 @@
         const destMeta = tokens.dest[o.dest_asset];
 
         const order = [
-          row("State", badge(o.state)),
-          row("Transfer sequence", mono(o.transfer_sequence)),
-          row("Caller", mono(o.caller)),
-          row(
-            "Sold",
-            `<span class="mono">${amount(o.amount_in, inMeta?.decimals ?? 12, 8)}</span> ${esc(inMeta?.symbol ?? `asset #${o.asset_in ?? "?"}`)}`,
+          kv(
+            "sold",
+            asset(
+              o.amount_in,
+              inMeta,
+              `#${o.asset_in ?? "?"}`,
+              assetIcon(o.asset_in),
+            ),
           ),
-          row("Settled", `<span class="mono">${amount(o.eth_out, 18, 8)}</span> ETH`),
-          row("Forwarded", o.forwarded_amount ? `<span class="mono">${amount(o.forwarded_amount, 18, 8)}</span> ETH` : '<span class="dim">—</span>'),
-          row("Deposit address", mono(o.deposit_address)),
+          kv(
+            "received",
+            o.dest_amount
+              ? asset(
+                  o.dest_amount,
+                  destMeta,
+                  o.dest_asset ?? "",
+                  chainIcon(destChain(o)),
+                )
+              : '<span class="dim">pending</span>',
+          ),
+          kv("caller", addrLink(o.caller, "hydration")),
+          kv("recipient", addrLink(o.dest_address, destChain(o))),
+          kv("destination asset", mono(o.dest_asset)),
+          kv("settlement id", mono(o.settlement_sequence)),
+          kv("ntt sequence", mono(o.transfer_sequence)),
         ].join("");
 
         // The ceiling is what the emitter committed to; the fee is what the relayer actually took.
         const relay = [
-          row("Max relay fee", `<span class="mono">${amount(o.max_relay_fee, 18, 8)}</span> ETH`),
-          row("Relay fee paid", o.relay_fee ? `<span class="mono">${amount(o.relay_fee, 18, 8)}</span> ETH` : '<span class="dim">—</span>'),
-          row("Relayer", mono(o.relayer)),
+          kv("settled to ethereum", asset(o.eth_out, ETH)),
+          kv(
+            "forwarded",
+            o.forwarded_amount
+              ? asset(o.forwarded_amount, ETH)
+              : '<span class="dim">—</span>',
+          ),
+          kv(
+            "relay fee paid",
+            o.relay_fee
+              ? asset(o.relay_fee, ETH)
+              : '<span class="dim">—</span>',
+          ),
+          kv("max relay fee", asset(o.max_relay_fee, ETH)),
+          kv("relayer", addrLink(o.relayer, "ethereum")),
+          kv("deposit address", addrLink(o.deposit_address, "ethereum")),
         ].join("");
 
         const rail = [
-          row("Rail state", o.rail_state ? badge(o.rail_state) : '<span class="dim">—</span>'),
-          row("VAA", vaaLink(o.vaa_id)),
-          row("Consistency", o.wormhole_consistency ? esc(String(o.wormhole_consistency)) : '<span class="dim">—</span>'),
-          row("NTT digest", mono(o.digest)),
-          leg("Published", o.rail_published),
-          leg("Received", o.rail_received),
-          leg("Settled", o.rail_settled),
-        ].join("");
-
-        const dest = [
-          row("Status", o.settlement_status ? esc(o.settlement_status) : '<span class="dim">—</span>'),
-          row("Recipient", mono(o.dest_address)),
-          row("Asset", destMeta ? `${esc(destMeta.symbol)} <span class="dim">on ${esc(destMeta.chain ?? "?")}</span>` : mono(o.dest_asset)),
-          row("Amount", o.dest_amount ? `<span class="mono">${amount(o.dest_amount, destMeta?.decimals ?? 0, 8)}</span>` : '<span class="dim">—</span>'),
-          row(
-            "Transaction",
-            o.dest_tx_url
-              ? `<a class="mono" href="${esc(o.dest_tx_url)}" target="_blank" rel="noreferrer">${esc(o.dest_tx)}</a>`
-              : mono(o.dest_tx),
+          kv(
+            "state",
+            o.rail_state ? badge(o.rail_state) : '<span class="dim">—</span>',
           ),
+          kv("settlement vaa", vaaLink(o.vaa_id)),
+          kv("instruction vaa", vaaLink(o.instruction_vaa)),
+          kv(
+            "consistency",
+            o.wormhole_consistency
+              ? esc(String(o.wormhole_consistency))
+              : '<span class="dim">—</span>',
+          ),
+          kv("ntt digest", mono(short(o.digest, 14, 10))),
         ].join("");
 
-        document.getElementById("main").innerHTML = `
+        main.innerHTML = `
+          <h1 class="page-title">Order ${esc(o.settlement_sequence ?? o.transfer_sequence)} <span class="sub">${badge(o.state)}</span></h1>
+          <div class="legs">${route(o)}</div>
           <div class="panel">
-            <header><h2>Order ${esc(o.transfer_sequence)}</h2>${badge(o.state)}</header>
-            <dl>${order}</dl>
+            <div class="panel-head"><span class="t">Order</span></div>
+            ${order}
           </div>
           <div class="panel">
-            <header><h2>Legs</h2></header>
-            <dl>${leg("Placed on Hydration", o.placed)}${leg("Processed on Ethereum", o.processed)}</dl>
+            <div class="panel-head"><span class="t">Relay</span><span class="note">ETH is the rail, not the destination</span></div>
+            ${relay}
           </div>
           <div class="panel">
-            <header><h2>Relay</h2></header>
-            <dl>${relay}</dl>
-          </div>
-          <div class="panel">
-            <header><h2>NTT rail</h2></header>
-            <dl>${rail}</dl>
-          </div>
-          <div class="panel">
-            <header><h2>Destination</h2><span class="muted">via 1Click</span></header>
-            <dl>${dest}</dl>
+            <div class="panel-head"><span class="t">NTT rail</span></div>
+            ${rail}
           </div>`;
       }
 
@@ -135,9 +258,13 @@
         render(await json(`/api/orders/${encodeURIComponent(sequence)}`));
       }
 
-      live("orders", (u) => {
-        if (String(u.record?.transfer_sequence) === sequence) load();
-      });
+      live(
+        "orders",
+        (u) => {
+          if (String(u.record?.transfer_sequence) === sequence) load();
+        },
+        load,
+      );
 
       json("/api/tokens").then((t) => {
         if (t) tokens = t;
