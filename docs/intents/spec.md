@@ -28,7 +28,7 @@ Everything up to and including the Ethereum forward is **shared** — see
 
 The variants diverge only after the funds land at the deposit address:
 
-- **1Click** — the quote's solver network settles it. `nintent` nudges 1Click so the deposit is
+- **1Click** — the quote's solver network settles it. `intent`'s relayer app nudges 1Click so the deposit is
   noticed promptly. Nothing else is needed.
 - **MPC-derived** — POA credits the derived NEAR account `A`, and `IntentRouter` swaps and delivers
   under the authority of a published order. **§1 onward covers only this variant.**
@@ -92,7 +92,7 @@ an order with no funding step.
 
 Relaying is [`agents/relayer`](../../agents/relayer/)'s `intent` feature: it subscribes to the
 Hydration WETH transceiver, finds the instruction in the source transaction's `LogMessagePublished`
-logs, prices the fee via [`quoter`](../../agents/quoter/), and submits. Retries ride the relayer
+logs, prices the fee by estimating the real call, and submits. Retries ride the relayer
 engine's Redis-backed backoff; an order stale beyond the age cap is dropped rather than retried
 forever.
 

@@ -1,6 +1,6 @@
 import { type Address, type PublicClient } from "viem";
 
-import log from "./logger";
+import log from "../../logger";
 import { OrderProcessedEvt } from "./abi";
 import { submitDeposit } from "./oneclick";
 
@@ -9,15 +9,15 @@ export interface IntentWatcherCfg {
   receiver: Address;
 }
 
+// How often to probe the socket. viem reconnects + re-subscribes on its own; this only makes the
+// drop/recovery visible in the logs (and surfaces a socket that never comes back).
+const HEARTBEAT_MS = 30_000;
+
 /**
  * Watches `IntentReceiver.OrderProcessed` over a WebSocket transport (viem `eth_subscribe`, no
  * polling) and pings 1Click for each forward so the deposit is detected immediately. viem reconnects
  * and re-subscribes on drop; submissions are deduped by (txHash, depositAddress) against redelivery.
  */
-// How often to probe the socket. viem reconnects + re-subscribes on its own; this only makes the
-// drop/recovery visible in the logs (and surfaces a socket that never comes back).
-const HEARTBEAT_MS = 30_000;
-
 export class IntentWatcher {
   private unwatch?: () => void;
   private heartbeat?: NodeJS.Timeout;
@@ -102,7 +102,9 @@ export class IntentWatcher {
       return r.status;
     } catch (e) {
       this.seen.delete(key); // best-effort: let a later event / manual call retry
-      log.error(`[${this.cfg.name}] submitDepositTx failed for ${depositAddress}: ${(e as Error).message}`);
+      log.error(
+        `[${this.cfg.name}] submitDepositTx failed for ${depositAddress}: ${(e as Error).message}`,
+      );
       return null;
     }
   }

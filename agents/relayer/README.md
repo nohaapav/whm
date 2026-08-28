@@ -27,8 +27,9 @@ verifies the emitter and writes the price in one call.
 Relays intents **from Hydration to Ethereum**. Hydration settles WETH over NTT and publishes a
 forwarding instruction beside it; this pairs the two and calls
 `IntentReceiver.processOrder(nttVaa, instructionVaa, feeRequested)`, which delivers the settlement,
-forwards it to the order's `depositAddress`, and reimburses the caller. The fee comes from the
-[quoter](../quoter/) service and is retried with backoff while it exceeds the order's `maxRelayFee`.
+forwards it to the order's `depositAddress`, and reimburses the caller. The fee is measured, not
+forecast — `estimateContractGas` on the real call at the order's own ceiling, priced at
+`maxFeePerGas` — and is retried with backoff while it exceeds the order's `maxRelayFee`.
 
 Only the settlement is subscribed to — the instruction is derived from the source transaction on
 demand, so there is no pairing state to lose across restarts.
@@ -46,7 +47,6 @@ caps are constants in each app's `config.ts` and `routes.ts`.
 | `PRIVKEY`             | Signing key. Same name everywhere — **see below** | Required                              |
 | `RPC_HYDRATION`       | Hydration EVM RPC (chain `222222`)                | `https://hydration-rpc.n.dwellir.com` |
 | `RPC_ETHEREUM`        | Ethereum RPC (`intent` only)                      | `https://eth.llamarpc.com`            |
-| `QUOTER_URL`          | quoter service base URL (`intent` only)           | `http://localhost:8080`               |
 | `SPY_ENDPOINT`        | Wormhole Spy endpoint                             | `localhost:7073`                      |
 | `REDIS_HOST`          | Redis host                                        | `localhost`                           |
 | `REDIS_PORT`          | Redis port                                        | `6379`                                |

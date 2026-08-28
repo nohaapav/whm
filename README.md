@@ -68,7 +68,7 @@ contracts/      # Foundry (Solidity) — @whm/contracts
 crates/         # Anchor / Cargo workspaces — @whm/crates-solana (extensible)
 migrations/     # Cross-platform deploy pipelines
 deployments/    # Migration state files (prod/, fork/)
-agents/         # Off-chain services (broadcaster, scan, relayer, quoter, nintent)
+agents/         # Off-chain services (broadcaster, scan, relayer, intent)
 common/         # @whm/common — shared TS (evm, args, migration)
 sh/             # Cross-cutting bash wrappers (fork-*, migrate-*, verify-*)
 docs/           # Cross-cutting protocol docs
@@ -109,5 +109,4 @@ See [migrations/README.md](migrations/README.md) for the migration model, naming
 | `@whm/broadcaster`   | `agents/broadcaster/` | Wormhole price/rate publisher              |
 | `@whm/scan`          | `agents/scan/`        | Wormhole indexer (intent/basejump)         |
 | `@whm/relayer`       | `agents/relayer/`     | Wormhole VAA relayer (ntt, oracle, intent) |
-| `@whm/quoter`        | `agents/quoter/`      | Relay-fee quoter                           |
-| `@whm/nintent`       | `agents/nintent/`     | Intent deposit notifier (1Click)           |
+| `@whm/intent`        | `agents/intent/`      | Intents off-chain (relay-fee quoter, 1Click notifier) |

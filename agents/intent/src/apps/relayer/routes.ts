@@ -1,23 +1,17 @@
+import type { FastifyInstance } from "fastify";
 import { isAddress } from "viem";
 
-import { source } from "./config";
-import { app } from "./endpoints";
 import { submitDeposit } from "./oneclick";
-import { IntentWatcher } from "./watcher";
 
-export default function apiHandler(watcher: IntentWatcher): void {
-  app.get("/api/health", async () => ({ ok: true }));
-
-  app.get("/api/status", async () => ({
-    uptime: process.uptime(),
-    chain: source.name,
-    receiver: source.receiver,
-    wss: source.wssUrl,
-    processed: watcher.processed,
-  }));
-
-  // Manual trigger — public, no auth. Fire a 1Click submission by hand (e.g. if the socket was down
-  // when the event fired). Bypasses the watcher's dedupe so a retry always reaches 1Click.
+/**
+ * The notifier's own endpoints.
+ *
+ * Manual trigger — public, no auth. Fires a 1Click submission by hand (e.g. if the socket was down
+ * when the event fired). Bypasses the watcher's dedupe, so a retry always reaches 1Click.
+ *
+ * @param app Fastify instance.
+ */
+export function routes(app: FastifyInstance): void {
   app.post<{ Body: { depositAddress?: string; txHash?: string } }>(
     "/api/submit",
     async (req, reply) => {
