@@ -1,0 +1,116 @@
+{
+  "migration": "basejump-ethereum",
+  "environment": "prod",
+  "startedAt": "2026-08-28T09:31:24.276Z",
+  "completedAt": "2026-08-28T09:38:17.909Z",
+  "steps": [
+    {
+      "name": "001-deploy-emitter",
+      "status": "completed",
+      "output": {
+        "implAddress": "0xd729b00479d86ab23465086dc513a59ddb392319",
+        "proxyAddress": "0xa72e2bf29c840eb93adbb9ee1aa41580f01c9944",
+        "ownerAddress": "0x6d116C3E43Bc1bFd4EEBe5c7BF043a342Ea6bBB2",
+        "wormholeId": "2"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:31:24.278Z",
+      "completedAt": "2026-08-28T09:31:50.770Z"
+    },
+    {
+      "name": "002-set-landing@emitter",
+      "status": "completed",
+      "output": {
+        "txHash": "0xf76cbf53c69b0177569c510ee9e8e26e68c380b306b4c8bf49b29047df36e77f",
+        "landing": "0x00000000000000000000000070e9b12c3b19cb5f0e59984a5866278ab69df976"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:31:50.772Z",
+      "completedAt": "2026-08-28T09:32:28.498Z"
+    },
+    {
+      "name": "003-set-usdc-ntt-manager@emitter",
+      "status": "completed",
+      "output": {
+        "txHash": "0xa8f00a8c5c1a8463a5e885f403826e97bd570c63c918e95ef1c67d53f7b47962",
+        "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "manager": "0x447b2c7485A3d6813F8197E605b10BcCD8dd8398"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:32:28.500Z",
+      "completedAt": "2026-08-28T09:34:27.563Z"
+    },
+    {
+      "name": "004-set-usdc-fee@emitter",
+      "status": "completed",
+      "output": {
+        "txHash": "0x4f5c0a8c16be8fdfe55be69f8faf22fc0b559cadd04c4fea0fb511f07ef74669",
+        "asset": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+        "fee": "100000"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:34:27.565Z",
+      "completedAt": "2026-08-28T09:34:52.683Z"
+    },
+    {
+      "name": "005-deploy-receiver",
+      "status": "completed",
+      "output": {
+        "implAddress": "0x68b9bd652ff9dfe337644e1c3e4c55835013ea78",
+        "proxyAddress": "0x35bf3a1b9ac564c8f66c97cea1ee410cd3f97c8a",
+        "ownerAddress": "0x71FeB8b2849101a6E62e3369eaAfDc6154CD0Bc0",
+        "wormholeId": "73"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:34:52.684Z",
+      "completedAt": "2026-08-28T09:35:02.708Z"
+    },
+    {
+      "name": "006-set-emitter@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0x858dabb43c7c66b0843049403f67f0f5fce9dd06b276da884d6b2970072bf1f5",
+        "emitterChain": "2",
+        "emitter": "0x000000000000000000000000a72e2bf29c840eb93adbb9ee1aa41580f01c9944"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:35:02.710Z",
+      "completedAt": "2026-08-28T09:35:03.408Z"
+    },
+    {
+      "name": "007-set-landing@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0xc58946adfb6156bee8d48523c9be363ff01487d782ffe3f9d5ca11752755ecc9",
+        "landing": "0x00000000000000000000000070e9b12c3b19cb5f0e59984a5866278ab69df976"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:35:58.042Z",
+      "completedAt": "2026-08-28T09:35:59.128Z"
+    },
+    {
+      "name": "008-transfer-ownership@receiver",
+      "status": "completed",
+      "output": {
+        "txHash": "0x6e7cbd0593c9e1b5baeb9195410782feab69d99f11a7c60a11940d824b09b876",
+        "contract": "0x35bf3a1b9ac564c8f66c97cea1ee410cd3f97c8a",
+        "newOwner": "0xaa7e0000000000000000000000000000000aa7e1"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:37:18.774Z",
+      "completedAt": "2026-08-28T09:37:23.941Z"
+    },
+    {
+      "name": "009-transfer-ownership@emitter",
+      "status": "completed",
+      "output": {
+        "txHash": "0x70901873619bcc15fb5aac4a159c1eaf472272fbc2084b1f5d96abd2bad69974",
+        "contract": "0xa72e2bf29c840eb93adbb9ee1aa41580f01c9944",
+        "newOwner": "0xD557AeAf1e0cB3D226BfF3B7a10C2cdA9dA081E7"
+      },
+      "error": null,
+      "startedAt": "2026-08-28T09:37:23.942Z",
+      "completedAt": "2026-08-28T09:38:17.906Z"
+    }
+  ]
+}
