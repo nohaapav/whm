@@ -96,9 +96,17 @@ export const orders: Flow = {
     /** Where the user's asset actually lands. Not the Ethereum deposit address. */
     dest_address: "TEXT",
     dest_asset: "TEXT",
+    /** What settled. Null until it does — a refunded order delivers nothing. */
     dest_amount: "NUMERIC",
     dest_tx: "TEXT",
     dest_tx_url: "TEXT",
+    /** What the quote promised, which is an expectation and not a receipt. */
+    quoted_amount: "NUMERIC",
+    /** The origin asset returned to `refundTo`: ETH, back on Ethereum. */
+    refund_amount: "NUMERIC",
+    refund_reason: "TEXT",
+    refund_tx: "TEXT",
+    refund_tx_url: "TEXT",
     placed: "JSONB",
     processed: "JSONB",
   },
