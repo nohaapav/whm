@@ -24,7 +24,7 @@ Amounts are decimal strings in wei. Native only: the fee is paid out of what `In
 delivers, and that is always native ETH — a `feeAsset` naming anything but `native` or WETH is
 refused rather than answered in the wrong asset.
 
-**It answers what the delivery costs; the caller owns the headroom.** `marginBps` is per-request —
+**It answers what the relayer will bill; the caller owns the headroom.** `marginBps` is per-request —
 the SDK asks with `marginBps=2000` for its 20%. `FEE_MARGIN_BPS` defaults to `0` so a caller that
 forgets to pass one gets the estimate, not a silently biased number.
 
@@ -34,7 +34,12 @@ The gas figure is derived from the call the relayer will build rather than confi
 gas = 21_000                  intrinsic
     + 16·nonzero + 4·zero     calldata, from the VAA envelope
     + 560_000                 execution, pinned from measurement
+
+fee = gas × maxFeePerGas × (1 + marginBps)
 ```
+
+Priced at `maxFeePerGas`, not the base fee — that is what the relayer bills, and quoting the base
+fee instead leaves the caller's margin with nothing to cover.
 
 Both VAAs have fixed-length payloads and fixed framing, so the envelope is computable before either
 exists — only the guardian quorum is read live. Execution is pinned because it isn't derivable;
@@ -65,7 +70,7 @@ GET  /api/status                              # socket target and how many depos
 | ------------------- | ------- | ------------------------------------------------------------- | -------- |
 | `PORT`              | both    | HTTP port                                                     | `8080`   |
 | `LOG_LEVEL`         | both    | winston level                                                 | `info`   |
-| `ETH_RPC`           | quoter  | Ethereum RPC — base fee and the guardian set                  | Required |
+| `ETH_RPC`           | quoter  | Ethereum RPC — fee estimate and the guardian set              | Required |
 | `ETH_WORMHOLE_CORE` | quoter  | Wormhole core, for the guardian quorum                        | mainnet  |
 | `ETH_GAS_LIMIT`     | quoter  | Escape hatch: replaces the modelled envelope                  | unset    |
 | `FEE_MARGIN_BPS`    | quoter  | Margin when a request names none                              | `0`      |

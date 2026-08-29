@@ -27,7 +27,7 @@ gas = 21_000                  intrinsic
     + 16·nonzero + 4·zero     calldata, derived from the envelope
     + EXEC                    execution, pinned from measurement
 
-fee = gas × baseFee × (1 + marginBps)
+fee = gas × maxFeePerGas × (1 + marginBps)
 ```
 
 The caller owns the margin. [`agents/intent`](../../agents/intent/) returns the estimate; the SDK
@@ -82,18 +82,31 @@ that has gone stale shows up as a gap between the two.
 against. On a guardian-set rotation the calldata term tracks the change and this one does not —
 re-pin it if that happens.
 
-### Gas price — the current base fee
+### Gas price — what the relayer will bill, not what it will pay
 
-Not a percentile, and not `eth_gasPrice`. Two measurements decide this:
+`estimateFeesPerGas().maxFeePerGas`, which is the exact primitive the relayer prices with.
 
-- `effectiveGasPrice` equalled the block's base fee on **every** observed delivery. The relayer pays
-  no priority tip and still gets included, so base fee alone is the cost.
-- Base fee drifted 0.74×–1.71× between placement and delivery, **median 1.01×**. That is a
-  martingale: the current value is the best point estimate of the value ~14 minutes out, and no
-  amount of history improves it.
+The distinction is the whole point, and getting it wrong is what stalls orders. The relayer **pays**
+the base fee — `effectiveGasPrice` equalled it on every observed delivery, no priority tip, included
+anyway. But it **charges** `maxFeePerGas`, and viem computes that as `baseFee × 1.2` via its
+`baseFeeMultiplier`: the relayer's own headroom against the price moving before its transaction
+lands.
 
-The spread is real, but it is uncertainty for the caller's margin to absorb, not bias for the
-estimator to correct.
+Quote the base fee and the ceiling collapses onto the ask:
+
+```
+ceiling  = gas × base × 1.2      quote, then the caller's 20%
+asks     = gas × base × 1.2      viem's multiplier
+headroom = 0
+```
+
+Measured at −0.1%. Every order then becomes a coin flip on base-fee drift — it delivers if the base
+fee happens to fall between placement and relay, and retries until it does if it rises. Pricing the
+ask instead restores the caller's margin to the 20% it was meant to be.
+
+Base fee drift over the delivery lag was 0.74×–1.71×, **median 1.01×** — a martingale, so the
+current value is the best point estimate and no history improves it. That spread is what the
+caller's margin is for; it is uncertainty to absorb, not bias to correct.
 
 ## What this replaced
 

@@ -82,16 +82,20 @@ export class EthereumQuoter implements ChainQuoter {
   }
 
   /**
-   * What the relayer actually pays per unit of gas.
+   * What the relayer will bill per unit of gas.
    *
-   * The block's base fee, not `eth_gasPrice`: `effectiveGasPrice` equalled the base fee on every
-   * observed delivery — no priority tip is paid and the transaction is included anyway. Base fee
-   * over the ~14 minute delivery lag is also a martingale (measured median drift 1.01×), so the
-   * current value is the best point estimate and no history improves it.
+   * `estimateFeesPerGas().maxFeePerGas`, because that is the exact primitive the relayer prices
+   * with — not the base fee. The relayer *pays* the base fee (`effectiveGasPrice` equalled it on
+   * every observed delivery, no priority tip), but it *charges* `maxFeePerGas`, which viem inflates
+   * by a `baseFeeMultiplier` of 1.2 as its own headroom against the price moving before inclusion.
+   *
+   * Quoting the base fee instead made the ceiling and the ask identical — the caller's margin was
+   * consumed by that multiplier rather than covering drift, so any upward move stalled the order.
+   * The quote has to predict the ask, not the cost.
    */
   async gasPrice(): Promise<bigint> {
-    const block = await this.client.getBlock();
-    return block.baseFeePerGas ?? (await this.client.getGasPrice());
+    const fees = await this.client.estimateFeesPerGas();
+    return fees.maxFeePerGas ?? (await this.client.getGasPrice());
   }
 
   isNative(feeAsset: string): boolean {
