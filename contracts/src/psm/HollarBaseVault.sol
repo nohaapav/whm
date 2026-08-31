@@ -154,8 +154,11 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      `amount` bounds that: the worst this frame can ever book is what it itself asked to
     ///      move, exactly the old caller-amount behaviour, so nesting cannot inflate the total. It
     ///      does not stop a single deposit from *under*-crediting when it is genuinely short (that
-    ///      case is the fee-on-transfer one this delta exists to handle). Reverts if nothing
-    ///      arrived. `safeTransferFrom` itself still requests `amount`.
+    ///      case is the fee-on-transfer one this delta exists to handle). A zero delta reverts with
+    ///      `ZeroAmount`; a token that leaves the vault's balance *lower* than before the transfer
+    ///      underflows the subtraction and reverts on its own (`Panic(0x11)`), uncaught and
+    ///      unnamed — there is no scenario in between. `safeTransferFrom` itself still requests
+    ///      `amount`.
     /// @param recipient The H160 to credit on Hydration, left-padded. Rejected here if it is not
     ///        one, while the depositor still holds their money — the far side has no way to
     ///        return it.
