@@ -209,9 +209,9 @@ Launch values, `migrations/envs/<context>/psm-base.env`:
 
 | Env | Value | Bounds |
 |---|---|---|
-| bucket capacity | 250,000 HOLLAR | Total outstanding. Granted on Substrate, **not by this migration**. |
-| `DEPOSIT_LIMIT_CAPACITY` | 250,000 / 24 h | Inflow. Worst case over an arbitrary window is 2× capacity. |
-| `INBOUND_CAPACITY` / `OUTBOUND_CAPACITY` | 250,000 / 24 h | Mint / redeem velocity. Outbound deliberately not tighter — this is the primary redemption route. |
+| bucket capacity | 10,000 HOLLAR | Total outstanding. Granted on Substrate, **not by this migration**. |
+| `DEPOSIT_LIMIT_CAPACITY` | 10,000 / 24 h | Inflow. Worst case over an arbitrary window is 2× capacity. |
+| `INBOUND_CAPACITY` / `OUTBOUND_CAPACITY` | 10,000 / 24 h | Mint / redeem velocity. Outbound deliberately not tighter — this is the primary redemption route. |
 | `REDEEM_FEE_BPS` | 5 | Redemption only; refunds and cancellations carry none. Capped at 500. |
 | `SURPLUS_FLOOR_BPS` | 25 | Held back from the treasurer. |
 | `MIN_USDC_PRICE` | $0.99 (8 dp) | Deposits refuse below it; redemption stays open. The whole mint gate, and fixed at init — there is no setter. |
