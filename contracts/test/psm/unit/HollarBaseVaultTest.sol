@@ -169,8 +169,10 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         _assertSolvent();
     }
 
-    /// @dev 200 is the only level this route supports, so size buys no extra certainty. Pinned
-    ///      because a silent switch to 201 would publish messages the guardians never sign.
+    /// @dev 200 is the chosen level, not the only one this route could reach — Safe (201) and
+    ///      Finalized (202) are available on both guardian sets but unused here by design; the
+    ///      bucket, not consistency, bounds the instant-level risk. Pinned because a silent switch
+    ///      to 201 would delay every message behind a threshold nobody signed up to.
     function test_deposit_alwaysPublishesInstant() public {
         _deposit(alice, 10e6);
         assertEq(wormhole.lastPublished().consistencyLevel, 200, "small");

@@ -43,8 +43,10 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     /// @notice Fee ceiling the admin dial cannot pass. 5% would already be an emergency setting.
     uint256 internal constant MAX_FEE_BPS = 500;
 
-    /// @notice Publish immediately — guardians sign on inclusion. The only level this route can
-    ///         use, so every message from this contract carries it. See `_publish`.
+    /// @notice Publish immediately — guardians sign on inclusion. The chosen level for this
+    ///         route: Safe and Finalized are available on both Base's and Hydration's guardian
+    ///         sets but are not used here. What bounds the instant-level risk is the bucket, not
+    ///         consistency. See `_publish`.
     uint8 internal constant CONSISTENCY_INSTANT = 200;
 
     // ─── Config ─────────────────────────────────────────────────
@@ -565,11 +567,11 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         if (price < minUsdcPrice) revert UsdcBelowFloor(price, minUsdcPrice);
     }
 
-    /// @dev Always consistency 200. The guardians sign on inclusion, and it is the only level this
-    ///      route supports — 201/202 are not an option here, so there is no slower path to buy
-    ///      certainty with. The consequence is recorded rather than hidden: a Base reorg landing
-    ///      after a VAA is signed leaves that HOLLAR unbacked, bounded only by the deposit rate
-    ///      limit and the facilitator's bucket.
+    /// @dev Always consistency 200. Safe and Finalized are available on both Base's and
+    ///      Hydration's guardian sets — this is a deliberate choice, not the only level the route
+    ///      can reach. The consequence is recorded rather than hidden: a Base reorg landing after
+    ///      a VAA is signed leaves that HOLLAR unbacked, bounded not by a slower consistency level
+    ///      but by the deposit rate limit and the facilitator's bucket.
     function _publish(uint8 kind, bytes32 recipient, uint256 amount) private returns (uint64 sequence) {
         uint256 fee = wormhole.messageFee();
         if (msg.value < fee) revert InsufficientMessageFee(msg.value, fee);

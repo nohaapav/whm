@@ -72,9 +72,10 @@ REDEEM    user ──HOLLAR──▶ Facilitator ──burn    Facilitator ─�
 CANCEL    (queued claim)   Vault ──KIND_MINT──▶ Facilitator ──mint──▶ user
 ```
 
-Consistency: every message on this route publishes at 200 (immediate). 201/safe and 202/finalized
-are not available here, so there is no slower path a large deposit can take to buy certainty, and
-no size-based split to configure.
+Consistency: every message on this route publishes at 200 (immediate) — the chosen level, not the
+only one available. The Wormhole guardian set supports 201/safe and 202/finalized for both Base
+and Hydration on these contracts; this route does not use them. What bounds the instant-level risk
+is the facilitator bucket and the deposit rate limit, not a slower consistency level.
 
 ## Payload encoding
 
@@ -130,11 +131,12 @@ to the head only — which is where the stall is by definition — and everyone 
 
 **A Base reorg is an accepted residual, not a bounded one.** Publishing at 200 means guardians sign
 on inclusion, so a reorg that unwinds a deposit after its VAA is signed leaves that HOLLAR unbacked.
-An earlier design gated deposits above a cap onto consistency 201 and made that cap the whole bound;
-201 is not available on this route, so the cap was removed rather than left as a dial that did
-nothing. What remains bounding it is `DEPOSIT_LIMIT_CAPACITY` and the facilitator bucket — the
-corridor, not a slice of it — and the remedy for a breach is unchanged: burn the difference from
-treasury. Supersedes xchain#40.
+An earlier design gated deposits above a cap onto consistency 201. Safe (201) and Finalized (202)
+are available on both Base's and Hydration's guardian sets; the cap was removed because 200 is the
+deliberate choice for the whole route regardless of size, not because a slower level was
+unreachable. What bounds the instant-level risk is `DEPOSIT_LIMIT_CAPACITY` and the facilitator
+bucket — the corridor, not a slice of it — and the remedy for a breach is unchanged: burn the
+difference from treasury. Supersedes xchain#40.
 
 **Payouts are sized by Aave's virtual balance.** `getVirtualUnderlyingBalance` is the figure
 `withdraw` decrements; the aToken's raw holding also counts donations Aave never releases (measured
