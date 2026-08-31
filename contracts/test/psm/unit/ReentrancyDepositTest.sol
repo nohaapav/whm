@@ -130,6 +130,36 @@ contract ReentrancyDepositTest is Test, IHollarBaseVault {
         );
     }
 
+    /// @dev Regression: `deposit(0, ...)` must revert `ZeroAmount` even when a reentrant token's
+    ///      callback feeds real balance into the vault mid-transfer. The cap must run BEFORE the
+    ///      zero-check: capping first bounds the raw (uncapped, reentrancy-inflated) delta down to
+    ///      `amount` (0) before the zero-check ever sees it. Swapping the two lines lets the
+    ///      zero-check see the inflated, still-nonzero raw delta, pass it through, and only then
+    ///      cap it to zero — at which point `deposit` proceeds with `received = 0` instead of
+    ///      reverting: a wasted `KIND_MINT` publish that moves no value, not the named revert.
+    function test_deposit_zeroAmountRevertsEvenWithReentrantFunding() public {
+        address innerRecipient = makeAddr("innerRecipient");
+        address outerRecipient = makeAddr("outerRecipient");
+        uint256 innerAmount = 50_000e6;
+
+        usdc.mint(address(usdc), innerAmount);
+        usdc.selfApprove(address(vault));
+
+        usdc.armReentry(
+            address(vault),
+            abi.encodeCall(HollarBaseVault.deposit, (innerAmount, PsmPayload.fromAddress(innerRecipient)))
+        );
+
+        vm.prank(alice);
+        vm.expectRevert(ZeroAmount.selector);
+        vault.deposit(0, PsmPayload.fromAddress(outerRecipient));
+
+        // The whole call reverted, so nothing survives from either frame — not even the nested
+        // deposit's own otherwise-valid mint.
+        assertEq(wormhole.publishedCount(), 0, "no publish, from either frame");
+        assertEq(vault.principal(), 0, "no state survives the revert");
+    }
+
     function _publishedPayload(uint256 index) internal view returns (bytes memory payload) {
         (, payload,,) = wormhole.published(index);
     }
