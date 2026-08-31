@@ -422,6 +422,43 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         assertNotEq(PsmPayload.toAddress(rawRecipient), alice, "must not silently fall back to msg.sender");
     }
 
+    /// @dev Regression: a zero `hydrationRecipient` must be rejected here, while the redeemer's
+    ///      queue slot is still live. Without this, the slot zeroes and `principal` moves before
+    ///      the facilitator ever sees the KIND_MINT it will refuse for a zero recipient — the VAA
+    ///      is never consumed and the redeemer's credit is simply gone.
+    function test_cancelQueuedRedemption_rejectsZeroRecipient() public {
+        _deposit(alice, 50_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        vm.prank(alice);
+        vm.expectRevert(PsmPayload.ZeroRecipient.selector);
+        vault.cancelQueuedRedemption(index, bytes32(0));
+
+        assertTrue(vault.owed(alice) > 0, "the credit must still be queued, not silently dropped");
+    }
+
+    /// @dev Regression: a `hydrationRecipient` with dirty high bytes is not truncated to an H160 —
+    ///      truncation would let two distinct 32-byte values resolve to the same account, exactly
+    ///      the ambiguity `PsmPayload.toAddress` exists to refuse.
+    function test_cancelQueuedRedemption_rejectsDirtyHighBytes() public {
+        _deposit(alice, 50_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        bytes32 dirty = bytes32(uint256(1) << 200);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PsmPayload.NotAnAddress.selector, dirty));
+        vault.cancelQueuedRedemption(index, dirty);
+
+        assertTrue(vault.owed(alice) > 0, "the credit must still be queued, not silently dropped");
+    }
+
     function test_queue_drainPaysInArrivalOrder() public {
         _deposit(alice, 100_000e6);
         vault.receiveMessage(_redeemVaaSalted(alice, 1_000e6, PsmPayload.KIND_REDEEM, 1));
