@@ -30,8 +30,10 @@ no per-asset branching, but they also share no ledger.
 Holds the reserve. Inherits `MessageReceiver` (UUPS + Wormhole verification + replay guard) and
 `AccessControlUpgradeable`.
 
-- **`deposit(amount, recipient)`** — gates on the oracle and the deposit rate limit, pulls USDC,
-  adds to `principal`, supplies to Aave best-effort, and publishes a `KIND_MINT` message.
+- **`deposit(amount, recipient)`** — gates on the oracle, pulls USDC via `transferFrom(amount)`, then
+  charges the rate limit, adds to `principal`, and publishes `KIND_MINT` against the vault's own
+  observed balance delta across that transfer — never the caller's `amount` (xchain#55). Supplies
+  to Aave best-effort afterward.
 - **`receiveMessage(vaa)`** — verifies a `KIND_REDEEM` / `KIND_REFUND` message and **books an IOU**.
   It moves no money: the burn on Hydration is irreversible, so crediting must never be able to fail
   for want of liquidity.
@@ -143,6 +145,14 @@ difference from treasury. Supersedes xchain#40.
 `withdraw` decrements; the aToken's raw holding also counts donations Aave never releases (measured
 at 230.72 USDC on Base, and anyone can widen it). Overstating does not merely overpay — it sizes a
 payout Aave refuses and reverts the whole call.
+
+**Deposits are sized by the observed balance delta, not the caller's argument (xchain#55).**
+`deposit` reads the vault's USDC balance immediately before and after `transferFrom`, and charges
+the rate limit, books `principal`, and publishes the mint against that delta — never `amount`. A
+token that moves less than requested would otherwise let the rate limit, the books, and the minted
+figure all disagree with what the reserve actually holds. The read brackets only the transfer, not
+the Aave supply that follows, so best-effort investing never pollutes it. A zero delta reverts
+rather than booking a no-op deposit.
 
 **The emitter chain is pinned.** `MessageReceiver._onlyAuthorizedEmitter` compares against
 `authorizedEmitters[chain]`, which is `bytes32(0)` for any unbound chain, so a zero-emitter VAA

@@ -32,7 +32,7 @@ contract MockToken {
         return true;
     }
 
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+    function transferFrom(address from, address to, uint256 amount) external virtual returns (bool) {
         uint256 allowed = allowance[from][msg.sender];
         require(allowed >= amount, "allowance");
         if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
@@ -44,6 +44,33 @@ contract MockToken {
         require(balanceOf[from] >= amount, "balance");
         balanceOf[from] -= amount;
         balanceOf[to] += amount;
+    }
+}
+
+/// @notice Moves less than requested, the way a fee-on-transfer token does: `from` pays the full
+///         `amount`, `to` receives `amount - fee`, and the fee vanishes rather than landing
+///         anywhere. Exists to pin down that `deposit` must account the vault's own observed
+///         balance delta, never the caller's argument.
+contract MockFeeOnTransferToken is MockToken {
+    uint256 public feeBps;
+
+    constructor(string memory _name, uint8 _decimals, uint256 _feeBps) MockToken(_name, _decimals) {
+        feeBps = _feeBps;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external override returns (bool) {
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "allowance");
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+
+        require(balanceOf[from] >= amount, "balance");
+        uint256 fee = (amount * feeBps) / 10_000;
+        uint256 sent = amount - fee;
+
+        balanceOf[from] -= amount;
+        balanceOf[to] += sent;
+        totalSupply -= fee;
+        return true;
     }
 }
 
