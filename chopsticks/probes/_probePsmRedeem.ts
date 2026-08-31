@@ -53,7 +53,7 @@ const BASE_CHAIN = 30;
 const HYDRATION_CHAIN_ID = 222222;
 const SCALE = 10n ** 12n;
 
-const BUCKET_CAPACITY = 250_000n * 10n ** 18n;
+const BUCKET_CAPACITY = 10_000n * 10n ** 18n;
 const MINT_USDC = 10_000n * 10n ** 6n;
 const REDEEM_USDC = 5_000n * 10n ** 6n;
 
