@@ -151,8 +151,16 @@ payout Aave refuses and reverts the whole call.
 the rate limit, books `principal`, and publishes the mint against that delta — never `amount`. A
 token that moves less than requested would otherwise let the rate limit, the books, and the minted
 figure all disagree with what the reserve actually holds. The read brackets only the transfer, not
-the Aave supply that follows, so best-effort investing never pollutes it. A zero delta reverts
-rather than booking a no-op deposit.
+the Aave supply that follows, so best-effort investing never pollutes it.
+
+The delta is trustworthy only because nothing else is supposed to move this balance inside the
+bracket — there is no reentrancy guard, so that is an assumption, not a guarantee. A token whose
+`transferFrom` calls back into a second `deposit` can land real funds in the vault before the outer
+frame's own transfer completes, and an uncapped read would then book them twice: once for the
+nested call, again for the outer one. The residual is closed by capping the observed delta at
+`amount` — the worst any single call can ever book is what it itself asked to move, exactly the
+pre-delta behaviour — not by adding a guard. A zero delta (after capping) reverts rather than
+booking a no-op deposit.
 
 **The emitter chain is pinned.** `MessageReceiver._onlyAuthorizedEmitter` compares against
 `authorizedEmitters[chain]`, which is `bytes32(0)` for any unbound chain, so a zero-emitter VAA

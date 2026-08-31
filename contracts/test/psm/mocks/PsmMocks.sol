@@ -74,6 +74,54 @@ contract MockFeeOnTransferToken is MockToken {
     }
 }
 
+/// @notice A token whose `transferFrom` calls back into an arbitrary target before moving any
+///         balance, standing in for an ERC-777-style hook or any callback-carrying token. Exists
+///         to construct the reentrancy PoC a delta-based `deposit` must resist: nesting a second
+///         deposit inside the first's transfer must not let the outer frame's balance read absorb
+///         funds the inner frame already accounted for.
+contract MockReentrantToken is MockToken {
+    address internal reentryTarget;
+    bytes internal reentryCalldata;
+    bool internal reentering;
+
+    constructor() MockToken("USDC", 6) {}
+
+    /// @dev Fires once, on the next `transferFrom`. Guarded by `reentering` so the nested call's
+    ///      own `transferFrom` does not re-arm itself into infinite recursion.
+    function armReentry(address target, bytes calldata data) external {
+        reentryTarget = target;
+        reentryCalldata = data;
+    }
+
+    /// @dev Lets the mock fund and approve itself as the source of the nested transfer, standing
+    ///      in for whatever account the attacker controls on the other side of the callback.
+    function selfApprove(address spender) external {
+        allowance[address(this)][spender] = type(uint256).max;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external virtual override returns (bool) {
+        if (!reentering && reentryTarget != address(0)) {
+            reentering = true;
+            address target = reentryTarget;
+            bytes memory data = reentryCalldata;
+            reentryTarget = address(0);
+            (bool ok, bytes memory ret) = target.call(data);
+            if (!ok) {
+                assembly {
+                    revert(add(ret, 0x20), mload(ret))
+                }
+            }
+            reentering = false;
+        }
+
+        uint256 allowed = allowance[from][msg.sender];
+        require(allowed >= amount, "allowance");
+        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+        _move(from, to, amount);
+        return true;
+    }
+}
+
 /// @notice HOLLAR's facilitator arithmetic, which is the module's solvency model.
 /// @dev `burn` subtracts from the bucket level with no floor, so a facilitator underflow-reverts
 ///      the moment it tries to burn more than it minted. That is deliberate, not a mock shortcut.

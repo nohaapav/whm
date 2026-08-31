@@ -144,9 +144,18 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     /// @dev Charges the rate limit, books `principal`, and publishes the vault's own observed
     ///      balance delta across the transfer — never the caller's `amount` — so a token that moves
     ///      less than requested (fee-on-transfer, say) cannot mint more HOLLAR than the reserve
-    ///      actually received. The read brackets only `safeTransferFrom`: `_investBestEffort` runs
-    ///      after the delta is captured, so its Aave supply never pollutes the measurement. Reverts
-    ///      if nothing arrived. `safeTransferFrom` itself still requests `amount`.
+    ///      actually received.
+    ///
+    ///      The delta is trustworthy only because nothing else is supposed to move this balance
+    ///      inside the bracket — and there is no reentrancy guard here, so that is an assumption,
+    ///      not a guarantee. A token whose `transferFrom` calls back into a second `deposit` can
+    ///      land real funds in the vault before this frame's own transfer completes, and this
+    ///      frame's read would then absorb them as if they were its own. Capping the delta at
+    ///      `amount` bounds that: the worst this frame can ever book is what it itself asked to
+    ///      move, exactly the old caller-amount behaviour, so nesting cannot inflate the total. It
+    ///      does not stop a single deposit from *under*-crediting when it is genuinely short (that
+    ///      case is the fee-on-transfer one this delta exists to handle). Reverts if nothing
+    ///      arrived. `safeTransferFrom` itself still requests `amount`.
     /// @param recipient The H160 to credit on Hydration, left-padded. Rejected here if it is not
     ///        one, while the depositor still holds their money — the far side has no way to
     ///        return it.
@@ -159,6 +168,10 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         uint256 balanceBefore = usdc.balanceOf(address(this));
         usdc.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = usdc.balanceOf(address(this)) - balanceBefore;
+        // Cap rather than trust the raw delta: a reentrant token could otherwise let this frame's
+        // read absorb funds a nested deposit already booked. This bounds the worst case at
+        // `amount`, exactly what the pre-delta code always used.
+        if (received > amount) received = amount;
         if (received == 0) revert ZeroAmount();
 
         depositLimit.consume(received);
