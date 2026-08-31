@@ -259,6 +259,10 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      Restricted to the head, so this retires the front entry exactly as a payment does. The
     ///      restriction costs nothing: the stall it exists to escape is at the head by definition,
     ///      and everyone behind leaves in turn as the head clears.
+    ///
+    ///      Gated by `claimsPaused` like the payment paths: this mints HOLLAR on Hydration, and an
+    ///      incident that pauses claims to stop a bad payout must also stop that queue entry from
+    ///      converting into a fresh mint on the other chain.
     /// @param index The queue slot, from the `RedeemCredited` event or `queueEntryOf` — cancellable
     ///        only once it is the head, i.e. once `queueEntryOf` reports `position == 0`.
     /// @param hydrationRecipient The H160 to re-credit on Hydration, left-padded. Explicit rather
@@ -270,6 +274,8 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         payable
         returns (uint64 sequence)
     {
+        if (claimsPaused) revert ClaimsPaused();
+
         Credit memory credit = queue[index];
         if (credit.amount == 0) revert NotQueued(index);
         if (credit.recipient != msg.sender) revert NotYourCredit(index, credit.recipient);

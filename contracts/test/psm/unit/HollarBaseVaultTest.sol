@@ -512,6 +512,31 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         vault.claim();
     }
 
+    /// @dev Regression: cancelling a queued redemption mints fresh HOLLAR on Hydration, so an
+    ///      incident that pauses claims to stop a bad payout must also stop the queue from being
+    ///      drained that way. It had no check.
+    function test_cancelQueuedRedemption_respectsClaimsPause() public {
+        _deposit(alice, 10_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 1_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        vm.prank(guardian);
+        vault.setClaimsPaused(true);
+
+        vm.prank(alice);
+        vm.expectRevert(ClaimsPaused.selector);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+
+        vm.prank(guardian);
+        vault.setClaimsPaused(false);
+
+        vm.prank(alice);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        assertEq(vault.owed(alice), 0, "cancel succeeds once claims are unpaused");
+    }
+
     /// @dev `drain` is the only path that pays a non-empty queue, and it is permissionless — so a
     ///      pause that misses it is not a pause at all. Regression: it had no check.
     function test_drain_respectsClaimsPause() public {

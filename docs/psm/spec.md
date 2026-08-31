@@ -37,8 +37,9 @@ Holds the reserve. Inherits `MessageReceiver` (UUPS + Wormhole verification + re
   for want of liquidity.
 - **`drain(maxEntries)` / `claim()`** — pay the queue head-first. Permissionless (`drain`) so nobody
   depends on us being online.
-- **`cancelQueuedRedemption(index)`** — the redeemer at the head gives up their place and takes
-  the HOLLAR back. Head only, so the queue is only ever modified at the front.
+- **`cancelQueuedRedemption(index, hydrationRecipient)`** — the redeemer at the head gives up their
+  place and takes the HOLLAR back, re-minted to the named Hydration recipient rather than implicitly
+  to the Base caller. Head only, so the queue is only ever modified at the front.
 - **`claimUnpayable(recipient)`** — pays out a credit that was retired because its recipient could
   not receive USDC, once that clears.
 
