@@ -261,13 +261,24 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      and everyone behind leaves in turn as the head clears.
     /// @param index The queue slot, from the `RedeemCredited` event or `queueEntryOf` — cancellable
     ///        only once it is the head, i.e. once `queueEntryOf` reports `position == 0`.
-    function cancelQueuedRedemption(uint256 index) external payable returns (uint64 sequence) {
+    /// @param hydrationRecipient The H160 to re-credit on Hydration, left-padded. Explicit rather
+    ///        than defaulting to `msg.sender`: for a contract wallet or an exchange depositor that
+    ///        address may not exist on Hydration, and the far side has no way to return a mint sent
+    ///        to nobody.
+    function cancelQueuedRedemption(uint256 index, bytes32 hydrationRecipient)
+        external
+        payable
+        returns (uint64 sequence)
+    {
         Credit memory credit = queue[index];
         if (credit.amount == 0) revert NotQueued(index);
         if (credit.recipient != msg.sender) revert NotYourCredit(index, credit.recipient);
         // Only the head ever moves. Zeroing a slot behind it would leave a hole every later
         // advance has to walk, and nothing bounds how many an attacker can leave.
         if (index != queueHead) revert CancelNotAtHead(index, queueHead);
+
+        // Validated here, where the caller can still pick a different one.
+        PsmPayload.toAddress(hydrationRecipient);
 
         queue[index].amount = 0;
         queueHead = index + 1;
@@ -279,9 +290,9 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         // this mints HOLLAR without locking anything new, so a Base reorg that unwound the
         // cancellation while the message stood would leave the credit queued AND the HOLLAR
         // reissued. Bounded by the deposit rate limit and the bucket, nothing narrower.
-        sequence = _publish(PsmPayload.KIND_MINT, PsmPayload.fromAddress(msg.sender), credit.gross);
+        sequence = _publish(PsmPayload.KIND_MINT, hydrationRecipient, credit.gross);
 
-        emit RedemptionCancelled(index, msg.sender, credit.gross, sequence);
+        emit RedemptionCancelled(index, msg.sender, credit.gross, hydrationRecipient, sequence);
     }
 
     /// @notice Pay out a retired credit once its recipient can receive again. Permissionless.

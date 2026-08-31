@@ -386,7 +386,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         uint256 principalBefore = vault.principal();
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         assertEq(vault.owed(alice), 0, "no longer owed USDC");
         assertEq(vault.principal(), principalBefore + 50_000e6, "gross returns to backing");
@@ -398,6 +398,28 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         // With the head gone, bob is reachable again.
         assertEq(vault.drain(10), 1_000e6 - 5e5, "bob is paid");
         _assertSolvent();
+    }
+
+    /// @dev Regression: the re-mint is credited to the recipient the caller names, never implicitly
+    ///      to `msg.sender`. A contract wallet or an exchange depositor's Base address may not exist
+    ///      on Hydration, and the far side has no way to return a mint sent to nobody.
+    function test_cancelQueuedRedemption_publishesToExplicitRecipientNotMsgSender() public {
+        _deposit(alice, 50_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        address custodyOnHydration = makeAddr("custodyOnHydration");
+
+        vm.prank(alice);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(custodyOnHydration));
+
+        (uint8 kind, bytes32 rawRecipient, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_MINT);
+        assertEq(amount, 50_000e6, "for the gross");
+        assertEq(PsmPayload.toAddress(rawRecipient), custodyOnHydration, "credited to the named recipient");
+        assertNotEq(PsmPayload.toAddress(rawRecipient), alice, "must not silently fall back to msg.sender");
     }
 
     function test_queue_drainPaysInArrivalOrder() public {
@@ -554,7 +576,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         (bool found, uint256 index,) = vault.queueEntryOf(alice);
         assertTrue(found);
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         _assertSolvent();
     }
