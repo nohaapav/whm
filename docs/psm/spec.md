@@ -41,7 +41,9 @@ Holds the reserve. Inherits `MessageReceiver` (UUPS + Wormhole verification + re
   depends on us being online.
 - **`cancelQueuedRedemption(index, hydrationRecipient)`** — the redeemer at the head gives up their
   place and takes the HOLLAR back, re-minted to the named Hydration recipient rather than implicitly
-  to the Base caller. Head only, so the queue is only ever modified at the front.
+  to the Base caller. Head only, so the queue is only ever modified at the front. Gated by
+  `claimsPaused` like `claim` and `drain`: it mints on Hydration, so a pause meant to stop a bad
+  payout must stop this path too.
 - **`claimUnpayable(recipient)`** — pays out a credit that was retired because its recipient could
   not receive USDC, once that clears.
 
@@ -188,9 +190,10 @@ admin could void a forged one, restoring `principal` and leaving everyone else p
 was removed: its threshold was evaded by splitting one redemption into several, and it defended a
 forged attestation — which needs a Wormhole guardian compromise, a threat excluded everywhere else
 here. The remaining lever is `setClaimsPaused`, which differs in two ways worth stating plainly. It
-is **collective**: stopping a forged payout stops every payout. And it **refuses to pay rather than
-erasing** — the credit stays a liability, so `surplus()` stays depressed by it and only an upgrade
-removes it.
+is **collective**: stopping a forged payout stops every payout, and also every `cancelQueuedRedemption`
+— a paused incident must not let a queued entry convert into a fresh mint on Hydration instead of a
+Base payout. And it **refuses to pay rather than erasing** — the credit stays a liability, so
+`surplus()` stays depressed by it and only an upgrade removes it.
 
 **Ownership is retired at init.** `owner = address(0)` in the initializer, so the inherited
 `setOwner` and `setAuthorizedEmitter` are permanently uncallable and roles are the only authority.
