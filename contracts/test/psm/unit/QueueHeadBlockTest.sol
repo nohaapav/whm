@@ -139,7 +139,7 @@ contract QueueHeadBlockTest is Test, IHollarBaseVault {
         uint256 principalBefore = vault.principal();
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         assertEq(vault.owed(alice), 0, "no longer owed USDC");
         assertEq(vault.unpayable(alice), 0, "and never had to be retired");
@@ -162,15 +162,15 @@ contract QueueHeadBlockTest is Test, IHollarBaseVault {
 
         vm.prank(mallory);
         vm.expectRevert(abi.encodeWithSelector(NotYourCredit.selector, index, alice));
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(mallory));
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         // And a cancelled slot cannot be cancelled twice.
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(NotQueued.selector, index));
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
     }
 
     /// Aave v3.3 charges withdrawals against `virtualUnderlyingBalance`, not the aToken's raw

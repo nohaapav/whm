@@ -40,7 +40,7 @@ interface IHollarBaseVault {
     event DisputeResolved(address indexed recipient, uint256 amount, bool credited);
     event Claimed(address indexed recipient, uint256 amount);
     event RedemptionCancelled(
-        uint256 indexed index, address indexed recipient, uint256 gross, uint64 sequence
+        uint256 indexed index, address indexed recipient, uint256 gross, bytes32 hydrationRecipient, uint64 sequence
     );
     event CreditUnpayable(uint256 indexed index, address indexed recipient, uint256 amount);
     event UnpayableClaimed(address indexed recipient, uint256 amount);

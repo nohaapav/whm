@@ -30,15 +30,20 @@ no per-asset branching, but they also share no ledger.
 Holds the reserve. Inherits `MessageReceiver` (UUPS + Wormhole verification + replay guard) and
 `AccessControlUpgradeable`.
 
-- **`deposit(amount, recipient)`** — gates on the oracle and the deposit rate limit, pulls USDC,
-  adds to `principal`, supplies to Aave best-effort, and publishes a `KIND_MINT` message.
+- **`deposit(amount, recipient)`** — gates on the oracle, pulls USDC via `transferFrom(amount)`, then
+  charges the rate limit, adds to `principal`, and publishes `KIND_MINT` against the vault's own
+  observed balance delta across that transfer — never the caller's `amount` (xchain#55). Supplies
+  to Aave best-effort afterward.
 - **`receiveMessage(vaa)`** — verifies a `KIND_REDEEM` / `KIND_REFUND` message and **books an IOU**.
   It moves no money: the burn on Hydration is irreversible, so crediting must never be able to fail
   for want of liquidity.
 - **`drain(maxEntries)` / `claim()`** — pay the queue head-first. Permissionless (`drain`) so nobody
   depends on us being online.
-- **`cancelQueuedRedemption(index)`** — the redeemer at the head gives up their place and takes
-  the HOLLAR back. Head only, so the queue is only ever modified at the front.
+- **`cancelQueuedRedemption(index, hydrationRecipient)`** — the redeemer at the head gives up their
+  place and takes the HOLLAR back, re-minted to the named Hydration recipient rather than implicitly
+  to the Base caller. Head only, so the queue is only ever modified at the front. Gated by
+  `claimsPaused` like `claim` and `drain`: it mints on Hydration, so a pause meant to stop a bad
+  payout must stop this path too.
 - **`claimUnpayable(recipient)`** — pays out a credit that was retired because its recipient could
   not receive USDC, once that clears.
 
@@ -72,9 +77,10 @@ REDEEM    user ──HOLLAR──▶ Facilitator ──burn    Facilitator ─�
 CANCEL    (queued claim)   Vault ──KIND_MINT──▶ Facilitator ──mint──▶ user
 ```
 
-Consistency: every message on this route publishes at 200 (immediate). 201/safe and 202/finalized
-are not available here, so there is no slower path a large deposit can take to buy certainty, and
-no size-based split to configure.
+Consistency: every message on this route publishes at 200 (immediate) — the chosen level, not the
+only one available. The Wormhole guardian set supports 201/safe and 202/finalized for both Base
+and Hydration on these contracts; this route does not use them. What bounds the instant-level risk
+is the facilitator bucket and the deposit rate limit, not a slower consistency level.
 
 ## Payload encoding
 
@@ -130,16 +136,35 @@ to the head only — which is where the stall is by definition — and everyone 
 
 **A Base reorg is an accepted residual, not a bounded one.** Publishing at 200 means guardians sign
 on inclusion, so a reorg that unwinds a deposit after its VAA is signed leaves that HOLLAR unbacked.
-An earlier design gated deposits above a cap onto consistency 201 and made that cap the whole bound;
-201 is not available on this route, so the cap was removed rather than left as a dial that did
-nothing. What remains bounding it is `DEPOSIT_LIMIT_CAPACITY` and the facilitator bucket — the
-corridor, not a slice of it — and the remedy for a breach is unchanged: burn the difference from
-treasury. Supersedes xchain#40.
+An earlier design gated deposits above a cap onto consistency 201. Safe (201) and Finalized (202)
+are available on both Base's and Hydration's guardian sets; the cap was removed because 200 is the
+deliberate choice for the whole route regardless of size, not because a slower level was
+unreachable. What bounds the instant-level risk is `DEPOSIT_LIMIT_CAPACITY` and the facilitator
+bucket — the corridor, not a slice of it — and the remedy for a breach is unchanged: burn the
+difference from treasury. Supersedes xchain#40.
 
 **Payouts are sized by Aave's virtual balance.** `getVirtualUnderlyingBalance` is the figure
 `withdraw` decrements; the aToken's raw holding also counts donations Aave never releases (measured
 at 230.72 USDC on Base, and anyone can widen it). Overstating does not merely overpay — it sizes a
 payout Aave refuses and reverts the whole call.
+
+**Deposits are sized by the observed balance delta, not the caller's argument (xchain#55).**
+`deposit` reads the vault's USDC balance immediately before and after `transferFrom`, and charges
+the rate limit, books `principal`, and publishes the mint against that delta — never `amount`. A
+token that moves less than requested would otherwise let the rate limit, the books, and the minted
+figure all disagree with what the reserve actually holds. The read brackets only the transfer, not
+the Aave supply that follows, so best-effort investing never pollutes it.
+
+The delta is trustworthy only because nothing else is supposed to move this balance inside the
+bracket — there is no reentrancy guard, so that is an assumption, not a guarantee. A token whose
+`transferFrom` calls back into a second `deposit` can land real funds in the vault before the outer
+frame's own transfer completes, and an uncapped read would then book them twice: once for the
+nested call, again for the outer one. The residual is closed by capping the observed delta at
+`amount` — the worst any single call can ever book is what it itself asked to move, exactly the
+pre-delta behaviour — not by adding a guard. A zero delta (after capping) reverts with the named
+`ZeroAmount` error rather than booking a no-op deposit; a token that leaves the vault's balance
+*lower* than before the transfer underflows the subtraction instead and reverts on its own
+(`Panic(0x11)`), uncaught and unnamed — there is no delta value between those two cases.
 
 **The emitter chain is pinned.** `MessageReceiver._onlyAuthorizedEmitter` compares against
 `authorizedEmitters[chain]`, which is `bytes32(0)` for any unbound chain, so a zero-emitter VAA
@@ -165,9 +190,10 @@ admin could void a forged one, restoring `principal` and leaving everyone else p
 was removed: its threshold was evaded by splitting one redemption into several, and it defended a
 forged attestation — which needs a Wormhole guardian compromise, a threat excluded everywhere else
 here. The remaining lever is `setClaimsPaused`, which differs in two ways worth stating plainly. It
-is **collective**: stopping a forged payout stops every payout. And it **refuses to pay rather than
-erasing** — the credit stays a liability, so `surplus()` stays depressed by it and only an upgrade
-removes it.
+is **collective**: stopping a forged payout stops every payout, and also every `cancelQueuedRedemption`
+— a paused incident must not let a queued entry convert into a fresh mint on Hydration instead of a
+Base payout. And it **refuses to pay rather than erasing** — the credit stays a liability, so
+`surplus()` stays depressed by it and only an upgrade removes it.
 
 **Ownership is retired at init.** `owner = address(0)` in the initializer, so the inherited
 `setOwner` and `setAuthorizedEmitter` are permanently uncallable and roles are the only authority.
@@ -209,9 +235,9 @@ Launch values, `migrations/envs/<context>/psm-base.env`:
 
 | Env | Value | Bounds |
 |---|---|---|
-| bucket capacity | 250,000 HOLLAR | Total outstanding. Granted on Substrate, **not by this migration**. |
-| `DEPOSIT_LIMIT_CAPACITY` | 250,000 / 24 h | Inflow. Worst case over an arbitrary window is 2× capacity. |
-| `INBOUND_CAPACITY` / `OUTBOUND_CAPACITY` | 250,000 / 24 h | Mint / redeem velocity. Outbound deliberately not tighter — this is the primary redemption route. |
+| bucket capacity | 10,000 HOLLAR | Total outstanding. Granted on Substrate, **not by this migration**. |
+| `DEPOSIT_LIMIT_CAPACITY` | 10,000 / 24 h | Inflow. Worst case over an arbitrary window is 2× capacity. |
+| `INBOUND_CAPACITY` / `OUTBOUND_CAPACITY` | 10,000 / 24 h | Mint / redeem velocity. Outbound deliberately not tighter — this is the primary redemption route. |
 | `REDEEM_FEE_BPS` | 5 | Redemption only; refunds and cancellations carry none. Capped at 500. |
 | `SURPLUS_FLOOR_BPS` | 25 | Held back from the treasurer. |
 | `MIN_USDC_PRICE` | $0.99 (8 dp) | Deposits refuse below it; redemption stays open. The whole mint gate, and fixed at init — there is no setter. |

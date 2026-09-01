@@ -169,8 +169,10 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         _assertSolvent();
     }
 
-    /// @dev 200 is the only level this route supports, so size buys no extra certainty. Pinned
-    ///      because a silent switch to 201 would publish messages the guardians never sign.
+    /// @dev 200 is the chosen level, not the only one this route could reach — Safe (201) and
+    ///      Finalized (202) are available on both guardian sets but unused here by design; the
+    ///      bucket, not consistency, bounds the instant-level risk. Pinned because a silent switch
+    ///      to 201 would delay every message behind a threshold nobody signed up to.
     function test_deposit_alwaysPublishesInstant() public {
         _deposit(alice, 10e6);
         assertEq(wormhole.lastPublished().consistencyLevel, 200, "small");
@@ -384,7 +386,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         uint256 principalBefore = vault.principal();
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         assertEq(vault.owed(alice), 0, "no longer owed USDC");
         assertEq(vault.principal(), principalBefore + 50_000e6, "gross returns to backing");
@@ -396,6 +398,65 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         // With the head gone, bob is reachable again.
         assertEq(vault.drain(10), 1_000e6 - 5e5, "bob is paid");
         _assertSolvent();
+    }
+
+    /// @dev Regression: the re-mint is credited to the recipient the caller names, never implicitly
+    ///      to `msg.sender`. A contract wallet or an exchange depositor's Base address may not exist
+    ///      on Hydration, and the far side has no way to return a mint sent to nobody.
+    function test_cancelQueuedRedemption_publishesToExplicitRecipientNotMsgSender() public {
+        _deposit(alice, 50_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        address custodyOnHydration = makeAddr("custodyOnHydration");
+
+        vm.prank(alice);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(custodyOnHydration));
+
+        (uint8 kind, bytes32 rawRecipient, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_MINT);
+        assertEq(amount, 50_000e6, "for the gross");
+        assertEq(PsmPayload.toAddress(rawRecipient), custodyOnHydration, "credited to the named recipient");
+        assertNotEq(PsmPayload.toAddress(rawRecipient), alice, "must not silently fall back to msg.sender");
+    }
+
+    /// @dev Regression: a zero `hydrationRecipient` must be rejected here, while the redeemer's
+    ///      queue slot is still live. Without this, the slot zeroes and `principal` moves before
+    ///      the facilitator ever sees the KIND_MINT it will refuse for a zero recipient — the VAA
+    ///      is never consumed and the redeemer's credit is simply gone.
+    function test_cancelQueuedRedemption_rejectsZeroRecipient() public {
+        _deposit(alice, 50_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        vm.prank(alice);
+        vm.expectRevert(PsmPayload.ZeroRecipient.selector);
+        vault.cancelQueuedRedemption(index, bytes32(0));
+
+        assertTrue(vault.owed(alice) > 0, "the credit must still be queued, not silently dropped");
+    }
+
+    /// @dev Regression: a `hydrationRecipient` with dirty high bytes is not truncated to an H160 —
+    ///      truncation would let two distinct 32-byte values resolve to the same account, exactly
+    ///      the ambiguity `PsmPayload.toAddress` exists to refuse.
+    function test_cancelQueuedRedemption_rejectsDirtyHighBytes() public {
+        _deposit(alice, 50_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        bytes32 dirty = bytes32(uint256(1) << 200);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(PsmPayload.NotAnAddress.selector, dirty));
+        vault.cancelQueuedRedemption(index, dirty);
+
+        assertTrue(vault.owed(alice) > 0, "the credit must still be queued, not silently dropped");
     }
 
     function test_queue_drainPaysInArrivalOrder() public {
@@ -488,6 +549,31 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         vault.claim();
     }
 
+    /// @dev Regression: cancelling a queued redemption mints fresh HOLLAR on Hydration, so an
+    ///      incident that pauses claims to stop a bad payout must also stop the queue from being
+    ///      drained that way. It had no check.
+    function test_cancelQueuedRedemption_respectsClaimsPause() public {
+        _deposit(alice, 10_000e6);
+        vault.receiveMessage(_redeemVaa(alice, 1_000e6, PsmPayload.KIND_REDEEM));
+
+        (bool found, uint256 index,) = vault.queueEntryOf(alice);
+        assertTrue(found);
+
+        vm.prank(guardian);
+        vault.setClaimsPaused(true);
+
+        vm.prank(alice);
+        vm.expectRevert(ClaimsPaused.selector);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+
+        vm.prank(guardian);
+        vault.setClaimsPaused(false);
+
+        vm.prank(alice);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        assertEq(vault.owed(alice), 0, "cancel succeeds once claims are unpaused");
+    }
+
     /// @dev `drain` is the only path that pays a non-empty queue, and it is permissionless — so a
     ///      pause that misses it is not a pause at all. Regression: it had no check.
     function test_drain_respectsClaimsPause() public {
@@ -552,7 +638,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         (bool found, uint256 index,) = vault.queueEntryOf(alice);
         assertTrue(found);
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         _assertSolvent();
     }

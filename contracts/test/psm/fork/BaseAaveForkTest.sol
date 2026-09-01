@@ -224,7 +224,7 @@ contract BaseAaveForkTest is Test, IHollarBaseVault {
         assertTrue(found, "her credit is queued");
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index);
+        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
 
         assertEq(vault.owed(alice), 0, "no longer queued");
         assertEq(vault.totalOwed(), 0);

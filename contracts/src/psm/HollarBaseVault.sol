@@ -43,8 +43,10 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     /// @notice Fee ceiling the admin dial cannot pass. 5% would already be an emergency setting.
     uint256 internal constant MAX_FEE_BPS = 500;
 
-    /// @notice Publish immediately — guardians sign on inclusion. The only level this route can
-    ///         use, so every message from this contract carries it. See `_publish`.
+    /// @notice Publish immediately — guardians sign on inclusion. The chosen level for this
+    ///         route: Safe and Finalized are available on both Base's and Hydration's guardian
+    ///         sets but are not used here. What bounds the instant-level risk is the bucket, not
+    ///         consistency. See `_publish`.
     uint8 internal constant CONSISTENCY_INSTANT = 200;
 
     // ─── Config ─────────────────────────────────────────────────
@@ -139,6 +141,24 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     // ─── Deposit — Base to Hydration ────────────────────────────
 
     /// @notice Lock USDC and attest it to Hydration.
+    /// @dev Charges the rate limit, books `principal`, and publishes the vault's own observed
+    ///      balance delta across the transfer — never the caller's `amount` — so a token that moves
+    ///      less than requested (fee-on-transfer, say) cannot mint more HOLLAR than the reserve
+    ///      actually received.
+    ///
+    ///      The delta is trustworthy only because nothing else is supposed to move this balance
+    ///      inside the bracket — and there is no reentrancy guard here, so that is an assumption,
+    ///      not a guarantee. A token whose `transferFrom` calls back into a second `deposit` can
+    ///      land real funds in the vault before this frame's own transfer completes, and this
+    ///      frame's read would then absorb them as if they were its own. Capping the delta at
+    ///      `amount` bounds that: the worst this frame can ever book is what it itself asked to
+    ///      move, exactly the old caller-amount behaviour, so nesting cannot inflate the total. It
+    ///      does not stop a single deposit from *under*-crediting when it is genuinely short (that
+    ///      case is the fee-on-transfer one this delta exists to handle). A zero delta reverts with
+    ///      `ZeroAmount`; a token that leaves the vault's balance *lower* than before the transfer
+    ///      underflows the subtraction and reverts on its own (`Panic(0x11)`), uncaught and
+    ///      unnamed — there is no scenario in between. `safeTransferFrom` itself still requests
+    ///      `amount`.
     /// @param recipient The H160 to credit on Hydration, left-padded. Rejected here if it is not
     ///        one, while the depositor still holds their money — the far side has no way to
     ///        return it.
@@ -148,16 +168,23 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         PsmPayload.toAddress(recipient);
         _checkOracle();
 
-        depositLimit.consume(amount);
-
+        uint256 balanceBefore = usdc.balanceOf(address(this));
         usdc.safeTransferFrom(msg.sender, address(this), amount);
-        principal += amount;
+        uint256 received = usdc.balanceOf(address(this)) - balanceBefore;
+        // Cap rather than trust the raw delta: a reentrant token could otherwise let this frame's
+        // read absorb funds a nested deposit already booked. This bounds the worst case at
+        // `amount`, exactly what the pre-delta code always used.
+        if (received > amount) received = amount;
+        if (received == 0) revert ZeroAmount();
+
+        depositLimit.consume(received);
+        principal += received;
 
         _investBestEffort();
 
-        sequence = _publish(PsmPayload.KIND_MINT, recipient, amount);
+        sequence = _publish(PsmPayload.KIND_MINT, recipient, received);
 
-        emit Deposited(msg.sender, recipient, amount, sequence);
+        emit Deposited(msg.sender, recipient, received, sequence);
     }
 
     // ─── Credit — Hydration to Base ─────────────────────────────
@@ -257,15 +284,32 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      Restricted to the head, so this retires the front entry exactly as a payment does. The
     ///      restriction costs nothing: the stall it exists to escape is at the head by definition,
     ///      and everyone behind leaves in turn as the head clears.
+    ///
+    ///      Gated by `claimsPaused` like the payment paths: this mints HOLLAR on Hydration, and an
+    ///      incident that pauses claims to stop a bad payout must also stop that queue entry from
+    ///      converting into a fresh mint on the other chain.
     /// @param index The queue slot, from the `RedeemCredited` event or `queueEntryOf` — cancellable
     ///        only once it is the head, i.e. once `queueEntryOf` reports `position == 0`.
-    function cancelQueuedRedemption(uint256 index) external payable returns (uint64 sequence) {
+    /// @param hydrationRecipient The H160 to re-credit on Hydration, left-padded. Explicit rather
+    ///        than defaulting to `msg.sender`: for a contract wallet or an exchange depositor that
+    ///        address may not exist on Hydration, and the far side has no way to return a mint sent
+    ///        to nobody.
+    function cancelQueuedRedemption(uint256 index, bytes32 hydrationRecipient)
+        external
+        payable
+        returns (uint64 sequence)
+    {
+        if (claimsPaused) revert ClaimsPaused();
+
         Credit memory credit = queue[index];
         if (credit.amount == 0) revert NotQueued(index);
         if (credit.recipient != msg.sender) revert NotYourCredit(index, credit.recipient);
         // Only the head ever moves. Zeroing a slot behind it would leave a hole every later
         // advance has to walk, and nothing bounds how many an attacker can leave.
         if (index != queueHead) revert CancelNotAtHead(index, queueHead);
+
+        // Validated here, where the caller can still pick a different one.
+        PsmPayload.toAddress(hydrationRecipient);
 
         queue[index].amount = 0;
         queueHead = index + 1;
@@ -277,9 +321,9 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         // this mints HOLLAR without locking anything new, so a Base reorg that unwound the
         // cancellation while the message stood would leave the credit queued AND the HOLLAR
         // reissued. Bounded by the deposit rate limit and the bucket, nothing narrower.
-        sequence = _publish(PsmPayload.KIND_MINT, PsmPayload.fromAddress(msg.sender), credit.gross);
+        sequence = _publish(PsmPayload.KIND_MINT, hydrationRecipient, credit.gross);
 
-        emit RedemptionCancelled(index, msg.sender, credit.gross, sequence);
+        emit RedemptionCancelled(index, msg.sender, credit.gross, hydrationRecipient, sequence);
     }
 
     /// @notice Pay out a retired credit once its recipient can receive again. Permissionless.
@@ -565,11 +609,11 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         if (price < minUsdcPrice) revert UsdcBelowFloor(price, minUsdcPrice);
     }
 
-    /// @dev Always consistency 200. The guardians sign on inclusion, and it is the only level this
-    ///      route supports — 201/202 are not an option here, so there is no slower path to buy
-    ///      certainty with. The consequence is recorded rather than hidden: a Base reorg landing
-    ///      after a VAA is signed leaves that HOLLAR unbacked, bounded only by the deposit rate
-    ///      limit and the facilitator's bucket.
+    /// @dev Always consistency 200. Safe and Finalized are available on both Base's and
+    ///      Hydration's guardian sets — this is a deliberate choice, not the only level the route
+    ///      can reach. The consequence is recorded rather than hidden: a Base reorg landing after
+    ///      a VAA is signed leaves that HOLLAR unbacked, bounded not by a slower consistency level
+    ///      but by the deposit rate limit and the facilitator's bucket.
     function _publish(uint8 kind, bytes32 recipient, uint256 amount) private returns (uint64 sequence) {
         uint256 fee = wormhole.messageFee();
         if (msg.value < fee) revert InsufficientMessageFee(msg.value, fee);

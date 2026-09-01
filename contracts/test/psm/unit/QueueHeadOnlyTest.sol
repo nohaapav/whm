@@ -133,7 +133,7 @@ contract QueueHeadOnlyTest is QueueFixture {
         for (uint256 i = 1; i <= deadSlots(); i++) {
             vm.prank(mallory);
             vm.expectRevert(abi.encodeWithSelector(CancelNotAtHead.selector, i, 0));
-            vault.cancelQueuedRedemption(i);
+            vault.cancelQueuedRedemption(i, PsmPayload.fromAddress(mallory));
         }
 
         assertEq(vault.queueHead(), 0, "head unmoved");
@@ -146,7 +146,7 @@ contract QueueHeadOnlyTest is QueueFixture {
         for (uint256 i = 1; i <= deadSlots(); i++) {
             assertEq(vault.queueHead(), i, "cancels advance the head one slot at a time");
             vm.prank(mallory);
-            vault.cancelQueuedRedemption(i);
+            vault.cancelQueuedRedemption(i, PsmPayload.fromAddress(mallory));
         }
 
         // The victim is the head now, reached without a walk: every cancel moved the head itself.
@@ -161,7 +161,7 @@ contract QueueHeadOnlyTest is QueueFixture {
     function test_queueLengthCountsOnlyLiveEntries() public {
         vault.drain(1);
         vm.prank(mallory);
-        vault.cancelQueuedRedemption(1);
+        vault.cancelQueuedRedemption(1, PsmPayload.fromAddress(mallory));
 
         // Was wrong while holes existed — tail minus head counted them.
         assertEq(vault.queueLength(), deadSlots() + 2 - 2);
@@ -184,16 +184,17 @@ contract QueueCostIsFlatTest is QueueFixture {
         vault.drain(1);
 
         vm.startPrank(mallory);
+        bytes32 malloryRecipient = PsmPayload.fromAddress(mallory);
         uint256 before = gasleft();
-        vault.cancelQueuedRedemption(1);
+        vault.cancelQueuedRedemption(1, malloryRecipient);
         uint256 firstCancel = before - gasleft();
 
         for (uint256 i = 2; i < N; i++) {
-            vault.cancelQueuedRedemption(i);
+            vault.cancelQueuedRedemption(i, malloryRecipient);
         }
 
         before = gasleft();
-        vault.cancelQueuedRedemption(N);
+        vault.cancelQueuedRedemption(N, malloryRecipient);
         uint256 lastCancel = before - gasleft();
         vm.stopPrank();
 
