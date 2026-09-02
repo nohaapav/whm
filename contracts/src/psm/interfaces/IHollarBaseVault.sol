@@ -23,6 +23,9 @@ interface IHollarBaseVault {
     ///         like anyone else's.
     struct Credit {
         address recipient;
+        /// @dev The redeemer on Hydration — who burned. A cancellation re-mints here and nowhere
+        ///      else: it is the one address known to exist on that chain.
+        address origin;
         /// @dev What the recipient is paid, net of fee.
         uint256 amount;
         /// @dev What left `principal` to book this credit. Cancelling returns this, not `amount`:
@@ -35,9 +38,11 @@ interface IHollarBaseVault {
     // ─── Events ─────────────────────────────────────────────────
 
     event Deposited(address indexed from, bytes32 indexed recipient, uint256 amount, uint64 sequence);
-    event RedeemCredited(address indexed recipient, uint256 gross, uint256 fee, uint256 credited, uint8 kind);
+    /// @dev `index` is the queue slot `cancelQueuedRedemption` takes.
+    event RedeemCredited(
+        uint256 indexed index, address indexed recipient, uint256 gross, uint256 fee, uint256 credited, uint8 kind
+    );
     event Disputed(address indexed recipient, uint256 amount, uint256 principal);
-    event DisputeResolved(address indexed recipient, uint256 amount, bool credited);
     event Claimed(address indexed recipient, uint256 amount);
     event RedemptionCancelled(
         uint256 indexed index, address indexed recipient, uint256 gross, bytes32 hydrationRecipient, uint64 sequence
@@ -74,7 +79,6 @@ interface IHollarBaseVault {
     error UnexpectedKind(uint8 kind);
     error UnexpectedEmitterChain(uint16 chainId);
     error FeeTooHigh(uint256 bps);
-    error NotDisputed(address recipient, uint256 requested, uint256 disputed);
     error SurplusBelowFloor(uint256 requested, uint256 sweepable);
     error ProtectedToken(address token);
     error InsufficientMessageFee(uint256 provided, uint256 required);

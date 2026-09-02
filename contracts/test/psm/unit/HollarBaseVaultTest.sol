@@ -111,7 +111,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
 
     function _redeemVaa(address recipient, uint256 amount, uint8 kind) internal pure returns (bytes memory) {
         return VaaBuilder.build(
-            HYDRATION_CHAIN, HYDRATION_EMITTER, PsmPayload.encode(kind, PsmPayload.fromAddress(recipient), amount)
+            HYDRATION_CHAIN, HYDRATION_EMITTER, PsmPayload.encode(kind, PsmPayload.fromAddress(recipient), amount, PsmPayload.fromAddress(recipient))
         );
     }
 
@@ -122,7 +122,17 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         returns (bytes memory)
     {
         return abi.encode(
-            HYDRATION_CHAIN, HYDRATION_EMITTER, PsmPayload.encode(kind, PsmPayload.fromAddress(recipient), amount), salt
+            HYDRATION_CHAIN, HYDRATION_EMITTER, PsmPayload.encode(kind, PsmPayload.fromAddress(recipient), amount, PsmPayload.fromAddress(recipient)), salt
+        );
+    }
+
+    /// @dev A redeem whose Hydration redeemer is not the Base recipient — the shape a cancel must
+    ///      get right.
+    function _redeemVaaWithOrigin(address recipient, address origin, uint256 amount) internal pure returns (bytes memory) {
+        return VaaBuilder.build(
+            HYDRATION_CHAIN,
+            HYDRATION_EMITTER,
+            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(recipient), amount, PsmPayload.fromAddress(origin))
         );
     }
 
@@ -162,10 +172,12 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         assertEq(aUsdc.balanceOf(address(vault)), 500e6, "supplied to Aave");
         assertEq(usdc.balanceOf(address(vault)), 0, "nothing left idle");
 
-        (uint8 kind, bytes32 recipient, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
+        (uint8 kind, bytes32 recipient, uint256 amount, bytes32 origin) =
+            PsmPayload.decode(wormhole.lastPublished().payload);
         assertEq(kind, PsmPayload.KIND_MINT);
         assertEq(PsmPayload.toAddress(recipient), alice);
         assertEq(amount, 500e6);
+        assertEq(PsmPayload.toAddress(origin), alice, "the depositor rides along as origin");
         _assertSolvent();
     }
 
@@ -330,7 +342,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         bytes memory vaa = VaaBuilder.build(
             HYDRATION_CHAIN,
             bytes32(uint256(0xdead)),
-            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(bob), 10e6)
+            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(bob), 10e6, PsmPayload.fromAddress(bob))
         );
 
         vm.expectRevert(MessageReceiver.NotAuthorizedEmitter.selector);
@@ -386,13 +398,13 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         uint256 principalBefore = vault.principal();
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
 
         assertEq(vault.owed(alice), 0, "no longer owed USDC");
         assertEq(vault.principal(), principalBefore + 50_000e6, "gross returns to backing");
 
-        (uint8 kind,, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
-        assertEq(kind, PsmPayload.KIND_MINT, "a mint goes back to Hydration");
+        (uint8 kind,, uint256 amount,) = PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_REMINT, "a re-mint goes back to Hydration");
         assertEq(amount, 50_000e6, "for the gross, not the net");
 
         // With the head gone, bob is reachable again.
@@ -400,63 +412,79 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         _assertSolvent();
     }
 
-    /// @dev Regression: the re-mint is credited to the recipient the caller names, never implicitly
-    ///      to `msg.sender`. A contract wallet or an exchange depositor's Base address may not exist
-    ///      on Hydration, and the far side has no way to return a mint sent to nobody.
-    function test_cancelQueuedRedemption_publishesToExplicitRecipientNotMsgSender() public {
+    /// @dev The re-mint goes to the credit's origin — the Hydration account that burned — never to
+    ///      `msg.sender`'s Base address mirrored onto Hydration, and never to a caller's pick. It
+    ///      travels as KIND_REMINT, and names the Base recipient as its own origin so a cancel on
+    ///      the far side comes back here.
+    function test_cancelQueuedRedemption_reMintsToOriginNotMsgSender() public {
+        address hydrationRedeemer = makeAddr("hydrationRedeemer");
         _deposit(alice, 50_000e6);
-        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+        vault.receiveMessage(_redeemVaaWithOrigin(alice, hydrationRedeemer, 50_000e6));
 
         (bool found, uint256 index,) = vault.queueEntryOf(alice);
         assertTrue(found);
 
-        address custodyOnHydration = makeAddr("custodyOnHydration");
-
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(custodyOnHydration));
+        vault.cancelQueuedRedemption(index);
 
-        (uint8 kind, bytes32 rawRecipient, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
-        assertEq(kind, PsmPayload.KIND_MINT);
+        (uint8 kind, bytes32 rawRecipient, uint256 amount, bytes32 rawOrigin) =
+            PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_REMINT, "a re-mint, not a deposit-shaped mint");
         assertEq(amount, 50_000e6, "for the gross");
-        assertEq(PsmPayload.toAddress(rawRecipient), custodyOnHydration, "credited to the named recipient");
-        assertNotEq(PsmPayload.toAddress(rawRecipient), alice, "must not silently fall back to msg.sender");
+        assertEq(PsmPayload.toAddress(rawRecipient), hydrationRedeemer, "back to who burned");
+        assertNotEq(PsmPayload.toAddress(rawRecipient), alice, "must not mirror msg.sender onto Hydration");
+        assertEq(PsmPayload.toAddress(rawOrigin), alice, "naming the Base recipient as origin in turn");
     }
 
-    /// @dev Regression: a zero `hydrationRecipient` must be rejected here, while the redeemer's
-    ///      queue slot is still live. Without this, the slot zeroes and `principal` moves before
-    ///      the facilitator ever sees the KIND_MINT it will refuse for a zero recipient — the VAA
-    ///      is never consumed and the redeemer's credit is simply gone.
-    function test_cancelQueuedRedemption_rejectsZeroRecipient() public {
+    /// @dev The admin's version picks nothing either: same origin, same books.
+    function test_cancelQueuedRedemptionFor_reMintsToOrigin() public {
+        address hydrationRedeemer = makeAddr("hydrationRedeemer");
         _deposit(alice, 50_000e6);
-        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+        vault.receiveMessage(_redeemVaaWithOrigin(alice, hydrationRedeemer, 50_000e6));
 
         (bool found, uint256 index,) = vault.queueEntryOf(alice);
         assertTrue(found);
+        uint256 principalBefore = vault.principal();
 
-        vm.prank(alice);
-        vm.expectRevert(PsmPayload.ZeroRecipient.selector);
-        vault.cancelQueuedRedemption(index, bytes32(0));
+        vm.prank(bob);
+        vm.expectRevert();
+        vault.cancelQueuedRedemptionFor(index);
 
-        assertTrue(vault.owed(alice) > 0, "the credit must still be queued, not silently dropped");
+        vm.prank(admin);
+        vault.cancelQueuedRedemptionFor(index);
+
+        assertEq(vault.owed(alice), 0, "no longer owed USDC");
+        assertEq(vault.principal(), principalBefore + 50_000e6, "gross returns to backing");
+
+        (uint8 kind, bytes32 rawRecipient, uint256 amount,) = PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_REMINT);
+        assertEq(amount, 50_000e6, "for the gross");
+        assertEq(PsmPayload.toAddress(rawRecipient), hydrationRedeemer, "to who burned, not the admin's choice");
+        _assertSolvent();
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(NotQueued.selector, index));
+        vault.cancelQueuedRedemptionFor(index);
     }
 
-    /// @dev Regression: a `hydrationRecipient` with dirty high bytes is not truncated to an H160 —
-    ///      truncation would let two distinct 32-byte values resolve to the same account, exactly
-    ///      the ambiguity `PsmPayload.toAddress` exists to refuse.
-    function test_cancelQueuedRedemption_rejectsDirtyHighBytes() public {
-        _deposit(alice, 50_000e6);
-        vault.receiveMessage(_redeemVaa(alice, 50_000e6, PsmPayload.KIND_REDEEM));
+    function test_cancelQueuedRedemptionFor_headOnlyAndRespectsPause() public {
+        _deposit(alice, 10_000e6);
+        vault.receiveMessage(_redeemVaaSalted(alice, 1_000e6, PsmPayload.KIND_REDEEM, 1));
+        vault.receiveMessage(_redeemVaaSalted(bob, 1_000e6, PsmPayload.KIND_REDEEM, 2));
 
-        (bool found, uint256 index,) = vault.queueEntryOf(alice);
-        assertTrue(found);
+        (, uint256 bobIndex,) = vault.queueEntryOf(bob);
+        uint256 head = vault.queueHead();
 
-        bytes32 dirty = bytes32(uint256(1) << 200);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(CancelNotAtHead.selector, bobIndex, head));
+        vault.cancelQueuedRedemptionFor(bobIndex);
 
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(PsmPayload.NotAnAddress.selector, dirty));
-        vault.cancelQueuedRedemption(index, dirty);
+        vm.prank(guardian);
+        vault.setClaimsPaused(true);
 
-        assertTrue(vault.owed(alice) > 0, "the credit must still be queued, not silently dropped");
+        vm.prank(admin);
+        vm.expectRevert(ClaimsPaused.selector);
+        vault.cancelQueuedRedemptionFor(head);
     }
 
     function test_queue_drainPaysInArrivalOrder() public {
@@ -564,13 +592,13 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
 
         vm.prank(alice);
         vm.expectRevert(ClaimsPaused.selector);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
 
         vm.prank(guardian);
         vault.setClaimsPaused(false);
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
         assertEq(vault.owed(alice), 0, "cancel succeeds once claims are unpaused");
     }
 
@@ -638,7 +666,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         (bool found, uint256 index,) = vault.queueEntryOf(alice);
         assertTrue(found);
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
 
         _assertSolvent();
     }
@@ -679,22 +707,18 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         assertEq(vault.queueLength(), 1);
     }
 
-    // ─── Disputed ───────────────────────────────────────────────
+    /// @dev The event is the UI's only cheap source of the slot `cancelQueuedRedemption` takes.
+    function test_receiveRedeem_eventCarriesQueueIndex() public {
+        _deposit(alice, 1_000e6);
+        vault.receiveMessage(_redeemVaaSalted(bob, 100e6, PsmPayload.KIND_REDEEM, 1));
 
-    function test_resolveDisputed_canCreditOrWriteOff() public {
-        _deposit(alice, 100e6);
-        vault.receiveMessage(_redeemVaaSalted(bob, 500e6, PsmPayload.KIND_REDEEM, 1));
-        vault.receiveMessage(_redeemVaaSalted(carol, 500e6, PsmPayload.KIND_REDEEM, 2));
+        vm.expectEmit(true, true, false, true);
+        emit RedeemCredited(1, carol, 200e6, 1e5, 200e6 - 1e5, PsmPayload.KIND_REDEEM);
+        vault.receiveMessage(_redeemVaaSalted(carol, 200e6, PsmPayload.KIND_REDEEM, 2));
 
-        vm.startPrank(admin);
-        vault.resolveDisputed(bob, 500e6, true);
-        vault.resolveDisputed(carol, 500e6, false);
-        vm.stopPrank();
-
-        assertEq(vault.owed(bob), 500e6, "governance decided to honour it");
-        assertEq(vault.owed(carol), 0, "and to write this one off");
-        assertEq(vault.disputed(bob), 0);
-        assertEq(vault.disputed(carol), 0);
+        (bool found, uint256 index,) = vault.queueEntryOf(carol);
+        assertTrue(found);
+        assertEq(index, 1, "the emitted slot is the one the queue reports");
     }
 
     // ─── Surplus ────────────────────────────────────────────────
@@ -813,7 +837,7 @@ contract HollarBaseVaultTest is Test, IHollarBaseVault {
         _deposit(alice, 10_000e6);
 
         bytes memory payload =
-            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(alice), 1_000e6);
+            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(alice), 1_000e6, PsmPayload.fromAddress(alice));
 
         vm.expectRevert(abi.encodeWithSelector(UnexpectedEmitterChain.selector, uint16(99)));
         vault.receiveMessage(abi.encode(uint16(99), bytes32(0), payload, uint256(1)));

@@ -66,7 +66,7 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
         return VaaBuilder.build(
             BASE_CHAIN,
             BASE_EMITTER,
-            PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(recipient), usdcAmount)
+            PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(recipient), usdcAmount, PsmPayload.fromAddress(recipient))
         );
     }
 
@@ -79,7 +79,22 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
         return VaaBuilder.buildSalted(
             chainId,
             emitter,
-            PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(recipient), usdcAmount),
+            PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(recipient), usdcAmount, PsmPayload.fromAddress(recipient)),
+            salt
+        );
+    }
+
+    /// @dev Any kind, any origin — for the re-mint and cancel paths, where the origin is not the
+    ///      recipient.
+    function _vaaOf(uint8 kind, address recipient, address origin, uint256 usdcAmount, uint256 salt)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return VaaBuilder.buildSalted(
+            BASE_CHAIN,
+            BASE_EMITTER,
+            PsmPayload.encode(kind, PsmPayload.fromAddress(recipient), usdcAmount, PsmPayload.fromAddress(origin)),
             salt
         );
     }
@@ -124,7 +139,7 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
         bytes memory vaa = VaaBuilder.build(
             BASE_CHAIN,
             bytes32(uint256(0xdead)),
-            PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(alice), 100e6)
+            PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(alice), 100e6, PsmPayload.fromAddress(alice))
         );
 
         vm.expectRevert(MessageReceiver.NotAuthorizedEmitter.selector);
@@ -135,7 +150,7 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
     ///      think it is, so it is refused rather than interpreted.
     function test_receiveMint_rejectsWrongKind() public {
         bytes memory vaa = VaaBuilder.build(
-            BASE_CHAIN, BASE_EMITTER, PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(alice), 100e6)
+            BASE_CHAIN, BASE_EMITTER, PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(alice), 100e6, PsmPayload.fromAddress(alice))
         );
 
         vm.expectRevert(abi.encodeWithSelector(UnexpectedKind.selector, PsmPayload.KIND_REDEEM));
@@ -274,22 +289,28 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
     // ─── Cancel ─────────────────────────────────────────────────
 
     /// @dev The exit from "queued forever". Nothing minted, so nothing burns and the bucket does
-    ///      not move — only a refund message goes back.
-    function test_cancelPendingMint_publishesRefund() public {
+    ///      not move — only a refund message goes back, to the entry's origin: the Base account
+    ///      that locked the USDC, never the Hydration recipient mirrored onto Base and never a
+    ///      caller's pick. It names the Hydration recipient as its own origin in turn.
+    function test_cancelPendingMint_refundsToOrigin() public {
+        address baseDepositor = makeAddr("baseDepositor");
         vm.prank(guardian);
         facilitator.setPaused(true, false);
-        facilitator.receiveMessage(_mintVaa(alice, 100e6));
+        facilitator.receiveMessage(_vaaOf(PsmPayload.KIND_MINT, alice, baseDepositor, 100e6, 1));
 
         vm.prank(alice);
-        facilitator.cancelPendingMint(0, PsmPayload.fromAddress(alice));
+        facilitator.cancelPendingMint(0);
 
         assertEq(facilitator.pendingOf(alice), 0);
         assertEq(facilitator.totalPendingMint(), 0);
         assertEq(_bucketLevel(), 0, "a cancelled mint never touched the bucket");
 
-        (uint8 kind, bytes32 recipient, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
+        (uint8 kind, bytes32 recipient, uint256 amount, bytes32 origin) =
+            PsmPayload.decode(wormhole.lastPublished().payload);
         assertEq(kind, PsmPayload.KIND_REFUND);
-        assertEq(PsmPayload.toAddress(recipient), alice);
+        assertEq(PsmPayload.toAddress(recipient), baseDepositor, "back to who locked it");
+        assertNotEq(PsmPayload.toAddress(recipient), alice, "must not mirror the Hydration recipient onto Base");
+        assertEq(PsmPayload.toAddress(origin), alice, "naming the Hydration recipient as origin in turn");
         assertEq(amount, 100e6);
     }
 
@@ -300,7 +321,75 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
 
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(NotYourPendingMint.selector, 0, alice));
-        facilitator.cancelPendingMint(0, PsmPayload.fromAddress(bob));
+        facilitator.cancelPendingMint(0);
+    }
+
+    /// @dev The admin's version picks nothing either: same origin, same books.
+    function test_cancelPendingMintFor_refundsToOrigin() public {
+        address baseDepositor = makeAddr("baseDepositor");
+        vm.prank(guardian);
+        facilitator.setPaused(true, false);
+        facilitator.receiveMessage(_vaaOf(PsmPayload.KIND_MINT, alice, baseDepositor, 100e6, 1));
+
+        vm.prank(bob);
+        vm.expectRevert();
+        facilitator.cancelPendingMintFor(0);
+
+        vm.prank(admin);
+        facilitator.cancelPendingMintFor(0);
+
+        assertEq(facilitator.pendingOf(alice), 0);
+        assertEq(facilitator.totalPendingMint(), 0);
+        assertEq(_bucketLevel(), 0, "nothing was minted, nothing burns");
+
+        (uint8 kind, bytes32 recipient, uint256 amount,) = PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_REFUND);
+        assertEq(PsmPayload.toAddress(recipient), baseDepositor, "to who locked it, not the admin's choice");
+        assertEq(amount, 100e6);
+
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(NotQueued.selector, 0));
+        facilitator.cancelPendingMintFor(0);
+    }
+
+    // ─── Re-mint ────────────────────────────────────────────────
+
+    /// @dev A re-mint is a mint on the books: same bucket check, same inbound charge. The kind is
+    ///      distinguishable on the wire and nowhere else.
+    function test_receiveRemint_chargesInboundLikeAMint() public {
+        vm.prank(admin);
+        facilitator.setLimits(150e6, RateLimiter.UNLIMITED, 1 days);
+        (, uint256 inboundBefore,,) = facilitator.limits();
+
+        facilitator.receiveMessage(_vaaOf(PsmPayload.KIND_REMINT, alice, bob, 100e6, 1));
+
+        assertEq(hollar.balanceOf(alice), 100e18);
+        (, uint256 inboundAfter,,) = facilitator.limits();
+        assertEq(inboundAfter, inboundBefore - 100e6, "charged to the inbound window like any mint");
+
+        vm.expectEmit(true, true, false, true);
+        emit MintQueued(0, alice, 100e6, QueueReason.RateLimited);
+        facilitator.receiveMessage(_vaaOf(PsmPayload.KIND_REMINT, alice, bob, 100e6, 2));
+        assertEq(hollar.balanceOf(alice), 100e18, "the second one queued on the limiter");
+    }
+
+    /// @dev A queued re-mint flushed later is charged exactly as arrival would have charged it.
+    function test_flushPendingMint_remintChargesInbound() public {
+        vm.prank(guardian);
+        facilitator.setPaused(true, false);
+        facilitator.receiveMessage(_vaaOf(PsmPayload.KIND_REMINT, alice, bob, 100e6, 1));
+
+        vm.prank(admin);
+        facilitator.setLimits(150e6, RateLimiter.UNLIMITED, 1 days);
+        vm.prank(guardian);
+        facilitator.setPaused(false, false);
+        (, uint256 inboundBefore,,) = facilitator.limits();
+
+        facilitator.flushPendingMint(0);
+
+        assertEq(hollar.balanceOf(alice), 100e18);
+        (, uint256 inboundAfter,,) = facilitator.limits();
+        assertEq(inboundAfter, inboundBefore - 100e6, "a flushed re-mint is charged like any mint");
     }
 
     // ─── Redeem ─────────────────────────────────────────────────
@@ -316,10 +405,12 @@ contract HollarBaseFacilitatorTest is Test, IHollarBaseFacilitator {
         assertEq(hollar.balanceOf(alice), 60e18);
         assertEq(_bucketLevel(), 60e18, "the burn credits the bucket back");
 
-        (uint8 kind, bytes32 recipient, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
+        (uint8 kind, bytes32 recipient, uint256 amount, bytes32 origin) =
+            PsmPayload.decode(wormhole.lastPublished().payload);
         assertEq(kind, PsmPayload.KIND_REDEEM);
         assertEq(PsmPayload.toAddress(recipient), bob);
         assertEq(amount, 40e6, "the wire carries USDC units, not HOLLAR");
+        assertEq(PsmPayload.toAddress(origin), alice, "the redeemer rides along as origin");
     }
 
     /// @dev #40: the redeem leg is instant and uncapped — its reorg exposure is one block wide and

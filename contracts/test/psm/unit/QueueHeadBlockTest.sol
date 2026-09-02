@@ -70,7 +70,7 @@ contract QueueHeadBlockTest is Test, IHollarBaseVault {
 
     function _vaa(address recipient, uint256 amount, uint256 salt) internal pure returns (bytes memory) {
         return abi.encode(HYDRATION_CHAIN, HYDRATION_EMITTER,
-            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(recipient), amount), salt);
+            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(recipient), amount, PsmPayload.fromAddress(recipient)), salt);
     }
 
     /// USDC on Base is blacklistable. Emulate Circle blacklisting `mallory` — every
@@ -139,15 +139,15 @@ contract QueueHeadBlockTest is Test, IHollarBaseVault {
         uint256 principalBefore = vault.principal();
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
 
         assertEq(vault.owed(alice), 0, "no longer owed USDC");
         assertEq(vault.unpayable(alice), 0, "and never had to be retired");
         assertEq(vault.principal(), principalBefore + 10_000e6, "gross returns to backing");
         assertEq(vault.queueLength(), 0, "the queue is clear");
 
-        (uint8 kind,, uint256 amount) = PsmPayload.decode(wormhole.lastPublished().payload);
-        assertEq(kind, PsmPayload.KIND_MINT);
+        (uint8 kind,, uint256 amount,) = PsmPayload.decode(wormhole.lastPublished().payload);
+        assertEq(kind, PsmPayload.KIND_REMINT);
         assertEq(amount, 10_000e6, "gross re-minted, so the fee is not charged for nothing");
     }
 
@@ -162,15 +162,15 @@ contract QueueHeadBlockTest is Test, IHollarBaseVault {
 
         vm.prank(mallory);
         vm.expectRevert(abi.encodeWithSelector(NotYourCredit.selector, index, alice));
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(mallory));
+        vault.cancelQueuedRedemption(index);
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
 
         // And a cancelled slot cannot be cancelled twice.
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(NotQueued.selector, index));
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
     }
 
     /// Aave v3.3 charges withdrawals against `virtualUnderlyingBalance`, not the aToken's raw

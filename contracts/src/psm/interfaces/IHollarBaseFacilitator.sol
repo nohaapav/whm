@@ -16,6 +16,9 @@ interface IHollarBaseFacilitator {
     ///         so the amount is the message's own and is never merged with another's.
     struct PendingMint {
         address recipient;
+        /// @dev The depositor on Base — who locked the USDC. A cancellation refunds here and
+        ///      nowhere else: it is the one address known to exist on that chain.
+        address origin;
         /// @dev USDC units. Zeroed once the entry is flushed or cancelled.
         uint256 amount;
     }

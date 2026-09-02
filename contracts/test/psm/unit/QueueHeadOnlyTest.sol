@@ -116,7 +116,7 @@ abstract contract QueueFixture is Test, IHollarBaseVault {
         return VaaBuilder.buildSalted(
             HYDRATION_CHAIN,
             HYDRATION_EMITTER,
-            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(to), amount),
+            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(to), amount, PsmPayload.fromAddress(to)),
             salt
         );
     }
@@ -133,7 +133,7 @@ contract QueueHeadOnlyTest is QueueFixture {
         for (uint256 i = 1; i <= deadSlots(); i++) {
             vm.prank(mallory);
             vm.expectRevert(abi.encodeWithSelector(CancelNotAtHead.selector, i, 0));
-            vault.cancelQueuedRedemption(i, PsmPayload.fromAddress(mallory));
+            vault.cancelQueuedRedemption(i);
         }
 
         assertEq(vault.queueHead(), 0, "head unmoved");
@@ -146,7 +146,7 @@ contract QueueHeadOnlyTest is QueueFixture {
         for (uint256 i = 1; i <= deadSlots(); i++) {
             assertEq(vault.queueHead(), i, "cancels advance the head one slot at a time");
             vm.prank(mallory);
-            vault.cancelQueuedRedemption(i, PsmPayload.fromAddress(mallory));
+            vault.cancelQueuedRedemption(i);
         }
 
         // The victim is the head now, reached without a walk: every cancel moved the head itself.
@@ -161,7 +161,7 @@ contract QueueHeadOnlyTest is QueueFixture {
     function test_queueLengthCountsOnlyLiveEntries() public {
         vault.drain(1);
         vm.prank(mallory);
-        vault.cancelQueuedRedemption(1, PsmPayload.fromAddress(mallory));
+        vault.cancelQueuedRedemption(1);
 
         // Was wrong while holes existed — tail minus head counted them.
         assertEq(vault.queueLength(), deadSlots() + 2 - 2);
@@ -184,17 +184,16 @@ contract QueueCostIsFlatTest is QueueFixture {
         vault.drain(1);
 
         vm.startPrank(mallory);
-        bytes32 malloryRecipient = PsmPayload.fromAddress(mallory);
         uint256 before = gasleft();
-        vault.cancelQueuedRedemption(1, malloryRecipient);
+        vault.cancelQueuedRedemption(1);
         uint256 firstCancel = before - gasleft();
 
         for (uint256 i = 2; i < N; i++) {
-            vault.cancelQueuedRedemption(i, malloryRecipient);
+            vault.cancelQueuedRedemption(i);
         }
 
         before = gasleft();
-        vault.cancelQueuedRedemption(N, malloryRecipient);
+        vault.cancelQueuedRedemption(N);
         uint256 lastCancel = before - gasleft();
         vm.stopPrank();
 

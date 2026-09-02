@@ -42,8 +42,14 @@ contract BaseAaveForkTest is Test, IHollarBaseVault {
     bool internal forked;
 
     function setUp() public {
-        try vm.createSelectFork(vm.rpcUrl("base")) {
-            forked = true;
+        // `rpcUrl` is resolved before the call it feeds, so its revert has to be caught separately
+        // or an unset RPC_BASE fails setUp instead of skipping the suite.
+        try vm.rpcUrl("base") returns (string memory url) {
+            try vm.createSelectFork(url) {
+                forked = true;
+            } catch {
+                return;
+            }
         } catch {
             return;
         }
@@ -224,7 +230,7 @@ contract BaseAaveForkTest is Test, IHollarBaseVault {
         assertTrue(found, "her credit is queued");
 
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, PsmPayload.fromAddress(alice));
+        vault.cancelQueuedRedemption(index);
 
         assertEq(vault.owed(alice), 0, "no longer queued");
         assertEq(vault.totalOwed(), 0);
@@ -246,7 +252,7 @@ contract BaseAaveForkTest is Test, IHollarBaseVault {
         v.emitterChainId = HYDRATION_CHAIN;
         v.emitterAddress = bytes32(uint256(0x4bd7a));
         v.payload =
-            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(recipient), amount);
+            PsmPayload.encode(PsmPayload.KIND_REDEEM, PsmPayload.fromAddress(recipient), amount, PsmPayload.fromAddress(recipient));
         v.hash = keccak256(abi.encode(recipient, amount));
     }
 

@@ -104,7 +104,7 @@ contract DepositDeltaTest is Test, IHollarBaseVault {
         assertEq(vault.principal(), received, "principal books the delta, not the argument");
         assertEq(vault.depositAllowance(), 1_000_000e6 - received, "rate limit charges the delta");
 
-        (, bytes32 recipient, uint256 published) = PsmPayload.decode(wormhole.lastPublished().payload);
+        (, bytes32 recipient, uint256 published,) = PsmPayload.decode(wormhole.lastPublished().payload);
         assertEq(PsmPayload.toAddress(recipient), alice);
         assertEq(published, received, "published figure is the delta, not the argument");
 

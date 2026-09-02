@@ -49,8 +49,14 @@ contract HydrationFacilitatorForkTest is Test {
     bool internal forked;
 
     function setUp() public {
-        try vm.createSelectFork(vm.rpcUrl("hydration")) {
-            forked = true;
+        // `rpcUrl` is resolved before the call it feeds, so its revert has to be caught separately
+        // or an unset RPC_HYDRATION fails setUp instead of skipping the suite.
+        try vm.rpcUrl("hydration") returns (string memory url) {
+            try vm.createSelectFork(url) {
+                forked = true;
+            } catch {
+                return;
+            }
         } catch {
             return;
         }
@@ -101,7 +107,7 @@ contract HydrationFacilitatorForkTest is Test {
         IWormhole.VM memory v;
         v.emitterChainId = BASE_CHAIN;
         v.emitterAddress = VAULT_EMITTER;
-        v.payload = PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(recipient), usdcAmount);
+        v.payload = PsmPayload.encode(PsmPayload.KIND_MINT, PsmPayload.fromAddress(recipient), usdcAmount, PsmPayload.fromAddress(recipient));
         v.hash = keccak256(abi.encode(recipient, usdcAmount, salt));
 
         vm.mockCall(

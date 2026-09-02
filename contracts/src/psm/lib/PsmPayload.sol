@@ -5,13 +5,19 @@ pragma solidity ^0.8.24;
 /// @notice Fixed-width, byte-packed body carried inside a Wormhole VAA payload. Both ends of the
 ///         corridor decode with this library, so the format has exactly one definition.
 ///
-/// @dev Layout, 66 bytes, big-endian:
+/// @dev Layout, 98 bytes, big-endian:
 ///
-///        ┌───────┬───────┬──────────────────────────────┬──────────────────────────────┐
-///        │  [0]  │  [1]  │           [2 .. 34)          │          [34 .. 66)          │
-///        │ uint8 │ uint8 │            bytes32           │           uint256            │
-///        │version│ kind  │  recipient — left-pad H160   │  amount — USDC units, 6 dp   │
-///        └───────┴───────┴──────────────────────────────┴──────────────────────────────┘
+///        ┌───────┬───────┬──────────────────────────┬──────────────────────────┬──────────────────────────┐
+///        │  [0]  │  [1]  │         [2 .. 34)        │        [34 .. 66)        │        [66 .. 98)        │
+///        │ uint8 │ uint8 │          bytes32         │          uint256         │          bytes32         │
+///        │version│ kind  │ recipient — left-pad H160│ amount — USDC units, 6dp │  origin — left-pad H160  │
+///        └───────┴───────┴──────────────────────────┴──────────────────────────┴──────────────────────────┘
+///
+///      **`origin` is the account that signed the originating transaction on the source chain**:
+///      the depositor on Base, the redeemer on Hydration. It is the one address guaranteed to
+///      exist there, so it is where a cancellation on the far side sends the value back. A
+///      cancellation swaps the pair: the message it publishes is addressed to the old `origin`,
+///      and names the old `recipient` as its own origin.
 ///
 ///      **The wire always carries USDC units, never HOLLAR units.** USDC is the lower precision
 ///      of the pair, so quoting the coarser unit makes conversion lossless in both directions and
@@ -35,9 +41,13 @@ library PsmPayload {
     uint8 internal constant KIND_REDEEM = 2;
     /// @notice Hydration to Base: a queued mint was cancelled, credit it back with no fee.
     uint8 internal constant KIND_REFUND = 3;
+    /// @notice Base to Hydration: a queued redemption was cancelled, re-mint what was burned. Handled
+    ///         exactly like a mint — bucket-checked and charged to the inbound window — and kept as
+    ///         its own kind only so a cancel is distinguishable from a deposit on the wire.
+    uint8 internal constant KIND_REMINT = 4;
 
     /// @notice Exact encoded length. Anything else is refused rather than padded or truncated.
-    uint256 internal constant LENGTH = 66;
+    uint256 internal constant LENGTH = 98;
 
     // ─── Errors ─────────────────────────────────────────────────
 
@@ -51,9 +61,13 @@ library PsmPayload {
 
     /// @notice Pack a body for publishing. Callers are responsible for having validated the
     ///         recipient on the source chain, where the user still holds their funds.
-    function encode(uint8 kind, bytes32 recipient, uint256 amount) internal pure returns (bytes memory) {
-        if (kind != KIND_MINT && kind != KIND_REDEEM && kind != KIND_REFUND) revert UnknownKind(kind);
-        return abi.encodePacked(VERSION, kind, recipient, amount);
+    function encode(uint8 kind, bytes32 recipient, uint256 amount, bytes32 origin)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        if (!_knownKind(kind)) revert UnknownKind(kind);
+        return abi.encodePacked(VERSION, kind, recipient, amount, origin);
     }
 
     // ─── Decode ─────────────────────────────────────────────────
@@ -64,22 +78,33 @@ library PsmPayload {
     ///      rejects a bad recipient at `deposit` while the user still holds their money, whereas
     ///      the facilitator must not revert on a valid VAA. Keeping the check out of `decode`
     ///      stops it becoming an unconditional revert on the receiving side.
-    function decode(bytes memory body) internal pure returns (uint8 kind, bytes32 recipient, uint256 amount) {
+    function decode(bytes memory body)
+        internal
+        pure
+        returns (uint8 kind, bytes32 recipient, uint256 amount, bytes32 origin)
+    {
         if (body.length != LENGTH) revert InvalidLength(body.length);
 
         uint8 version;
+        bytes32 rawOrigin; // `origin` is a Yul builtin, so it cannot be assigned inside assembly
         assembly {
             // body content starts at body+0x20; read the two leading bytes from the high end of
-            // the first word, then the two 32-byte fields at their offsets.
+            // the first word, then the three 32-byte fields at their offsets.
             let word := mload(add(body, 0x20))
             version := byte(0, word)
             kind := byte(1, word)
             recipient := mload(add(body, 0x22))
             amount := mload(add(body, 0x42))
+            rawOrigin := mload(add(body, 0x62))
         }
+        origin = rawOrigin;
 
         if (version != VERSION) revert UnsupportedVersion(version);
-        if (kind != KIND_MINT && kind != KIND_REDEEM && kind != KIND_REFUND) revert UnknownKind(kind);
+        if (!_knownKind(kind)) revert UnknownKind(kind);
+    }
+
+    function _knownKind(uint8 kind) private pure returns (bool) {
+        return kind >= KIND_MINT && kind <= KIND_REMINT;
     }
 
     // ─── Address conversion ─────────────────────────────────────

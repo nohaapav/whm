@@ -241,7 +241,7 @@ contract PsmRoundTripTest is Test {
         _assertBacked();
 
         vm.prank(alice);
-        facilitator.cancelPendingMint(0, _toBytes32(alice));
+        facilitator.cancelPendingMint(0);
         _relayHydrationToBase();
 
         assertEq(vault.owed(alice), 500e6, "a refund carries no fee");
@@ -319,7 +319,7 @@ contract PsmRoundTripTest is Test {
         (bool found, uint256 index,) = vault.queueEntryOf(alice);
         assertTrue(found);
         vm.prank(alice);
-        vault.cancelQueuedRedemption(index, _toBytes32(alice));
+        vault.cancelQueuedRedemption(index);
 
         assertEq(vault.owed(alice), 0, "no longer queued");
         assertEq(vault.principal(), principalAfterMint, "backing restored exactly");

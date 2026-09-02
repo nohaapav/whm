@@ -123,8 +123,8 @@ contract ReentrancyDepositTest is Test, IHollarBaseVault {
 
         assertEq(vault.principal(), held, "attested principal must not exceed what the reserve holds");
 
-        (,, uint256 innerPublished) = PsmPayload.decode(_publishedPayload(0));
-        (,, uint256 outerPublished) = PsmPayload.decode(_publishedPayload(1));
+        (,, uint256 innerPublished,) = PsmPayload.decode(_publishedPayload(0));
+        (,, uint256 outerPublished,) = PsmPayload.decode(_publishedPayload(1));
         assertEq(
             innerPublished + outerPublished, held, "published mint total must not exceed what the reserve holds"
         );

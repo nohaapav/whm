@@ -87,8 +87,12 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     mapping(address => uint256) public owed;
 
 
-    /// @notice Claimed more than was ever attested. Parked for governance rather than left to
-    ///         revert-loop a VAA that can never be consumed.
+    /// @notice Claimed more than was ever attested. Parked rather than left to revert-loop a VAA
+    ///         that can never be consumed. A record, not a balance: nothing here pays it out.
+    /// @dev The ledgers move in lockstep, so a hit means one of three things: a Base reorg that
+    ///      unwound a deposit after its mint VAA was signed (the consistency-200 residual), a
+    ///      forged VAA, or an accounting bug. None has a correct automatic payout; each is an
+    ///      investigation and an upgrade.
     mapping(address => uint256) public disputed;
 
     mapping(uint256 => Credit) public queue;
@@ -182,7 +186,7 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
 
         _investBestEffort();
 
-        sequence = _publish(PsmPayload.KIND_MINT, recipient, received);
+        sequence = _publish(PsmPayload.KIND_MINT, recipient, received, PsmPayload.fromAddress(msg.sender));
 
         emit Deposited(msg.sender, recipient, received, sequence);
     }
@@ -197,10 +201,11 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         // here closes it without changing the shared base.
         if (vm.emitterChainId != hydrationChainId) revert UnexpectedEmitterChain(vm.emitterChainId);
 
-        (uint8 kind, bytes32 rawRecipient, uint256 amount) = PsmPayload.decode(vm.payload);
+        (uint8 kind, bytes32 rawRecipient, uint256 amount, bytes32 rawOrigin) = PsmPayload.decode(vm.payload);
         if (kind != PsmPayload.KIND_REDEEM && kind != PsmPayload.KIND_REFUND) revert UnexpectedKind(kind);
 
         address recipient = PsmPayload.toAddress(rawRecipient);
+        address origin = PsmPayload.toAddress(rawOrigin);
 
         // More claimed than was ever attested: the books disagree with the far side, which is an
         // incident, not a payment. Park it rather than revert, so the VAA is consumed once and
@@ -218,9 +223,11 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         uint256 fee = kind == PsmPayload.KIND_REDEEM ? (amount * redeemFeeBps) / BPS : 0;
         uint256 credited = amount - fee;
 
-        _enqueue(recipient, credited, amount);
+        if (credited == 0) revert ZeroAmount();
 
-        emit RedeemCredited(recipient, amount, fee, credited, kind);
+        uint256 index = _enqueue(recipient, origin, credited, amount);
+
+        emit RedeemCredited(index, recipient, amount, fee, credited, kind);
     }
 
 
@@ -288,17 +295,13 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      Gated by `claimsPaused` like the payment paths: this mints HOLLAR on Hydration, and an
     ///      incident that pauses claims to stop a bad payout must also stop that queue entry from
     ///      converting into a fresh mint on the other chain.
+    ///
+    ///      The HOLLAR goes back to the credit's `origin` — the account that burned it on Hydration.
+    ///      Nobody picks: not `msg.sender`, whose Base address may not exist on Hydration, and not
+    ///      an argument, which the far side could not return if it named nobody.
     /// @param index The queue slot, from the `RedeemCredited` event or `queueEntryOf` — cancellable
     ///        only once it is the head, i.e. once `queueEntryOf` reports `position == 0`.
-    /// @param hydrationRecipient The H160 to re-credit on Hydration, left-padded. Explicit rather
-    ///        than defaulting to `msg.sender`: for a contract wallet or an exchange depositor that
-    ///        address may not exist on Hydration, and the far side has no way to return a mint sent
-    ///        to nobody.
-    function cancelQueuedRedemption(uint256 index, bytes32 hydrationRecipient)
-        external
-        payable
-        returns (uint64 sequence)
-    {
+    function cancelQueuedRedemption(uint256 index) external payable returns (uint64 sequence) {
         if (claimsPaused) revert ClaimsPaused();
 
         Credit memory credit = queue[index];
@@ -308,22 +311,27 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
         // advance has to walk, and nothing bounds how many an attacker can leave.
         if (index != queueHead) revert CancelNotAtHead(index, queueHead);
 
-        // Validated here, where the caller can still pick a different one.
-        PsmPayload.toAddress(hydrationRecipient);
+        return _cancel(index, credit);
+    }
 
-        queue[index].amount = 0;
-        queueHead = index + 1;
-        owed[msg.sender] -= credit.amount;
-        totalOwed -= credit.gross;
-        principal += credit.gross;
+    /// @notice Cancel the head on the redeemer's behalf. Admin only, head only, same gate and same
+    ///         books as the redeemer's own cancel, and the HOLLAR goes back to the same place: the
+    ///         account that burned it.
+    /// @dev The lever for a head its owner cannot or will not clear — a contract wallet, an
+    ///      unreachable user.
+    function cancelQueuedRedemptionFor(uint256 index)
+        external
+        payable
+        onlyRole(DEFAULT_ADMIN_ROLE)
+        returns (uint64 sequence)
+    {
+        if (claimsPaused) revert ClaimsPaused();
 
-        // Publishes instant like everything else here, which is the residual this route carries:
-        // this mints HOLLAR without locking anything new, so a Base reorg that unwound the
-        // cancellation while the message stood would leave the credit queued AND the HOLLAR
-        // reissued. Bounded by the deposit rate limit and the bucket, nothing narrower.
-        sequence = _publish(PsmPayload.KIND_MINT, hydrationRecipient, credit.gross);
+        Credit memory credit = queue[index];
+        if (credit.amount == 0) revert NotQueued(index);
+        if (index != queueHead) revert CancelNotAtHead(index, queueHead);
 
-        emit RedemptionCancelled(index, msg.sender, credit.gross, hydrationRecipient, sequence);
+        return _cancel(index, credit);
     }
 
     /// @notice Pay out a retired credit once its recipient can receive again. Permissionless.
@@ -462,18 +470,6 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     }
 
 
-
-    /// @notice Settle a parked over-claim, either by paying it or by writing it off.
-    function resolveDisputed(address recipient, uint256 amount, bool credited) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        uint256 parked = disputed[recipient];
-        if (amount == 0 || amount > parked) revert NotDisputed(recipient, amount, parked);
-
-        disputed[recipient] = parked - amount;
-        if (credited) _enqueue(recipient, amount, amount);
-
-        emit DisputeResolved(recipient, amount, credited);
-    }
-
     function rescueToken(address token, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (token == address(usdc) || token == address(aUsdc)) revert ProtectedToken(token);
         if (to == address(0)) revert ZeroAddress();
@@ -486,12 +482,41 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
 
     // ─── Internal ───────────────────────────────────────────────
 
-    function _enqueue(address recipient, uint256 amount, uint256 gross) private {
-        if (amount == 0) return;
-        queue[queueTail] = Credit({recipient: recipient, amount: amount, gross: gross});
-        queueTail++;
+    /// @dev Callers guarantee `amount > 0`. Returns the slot, which is what the events carry and
+    ///      what `cancelQueuedRedemption` takes.
+    function _enqueue(address recipient, address origin, uint256 amount, uint256 gross)
+        private
+        returns (uint256 index)
+    {
+        index = queueTail;
+        queue[index] = Credit({recipient: recipient, origin: origin, amount: amount, gross: gross});
+        queueTail = index + 1;
         owed[recipient] += amount;
         totalOwed += gross;
+    }
+
+    /// @dev Reverses a credit exactly: `gross` returns to `principal` and the same figure is
+    ///      re-minted to the credit's origin, so the corridor lands where it stood before the
+    ///      redemption. The re-mint names this credit's recipient as its own origin, so if it
+    ///      queues on Hydration and is cancelled there, the refund comes back to them.
+    function _cancel(uint256 index, Credit memory credit) private returns (uint64 sequence) {
+        queue[index].amount = 0;
+        queueHead = index + 1;
+        owed[credit.recipient] -= credit.amount;
+        totalOwed -= credit.gross;
+        principal += credit.gross;
+
+        bytes32 hydrationRecipient = PsmPayload.fromAddress(credit.origin);
+
+        // Publishes instant like everything else here, which is the residual this route carries:
+        // this mints HOLLAR without locking anything new, so a Base reorg that unwound the
+        // cancellation while the message stood would leave the credit queued AND the HOLLAR
+        // reissued. Bounded by the deposit rate limit and the bucket, nothing narrower.
+        sequence = _publish(
+            PsmPayload.KIND_REMINT, hydrationRecipient, credit.gross, PsmPayload.fromAddress(credit.recipient)
+        );
+
+        emit RedemptionCancelled(index, credit.recipient, credit.gross, hydrationRecipient, sequence);
     }
 
     /// @dev A recipient the reserve cannot pay must not hold the line. USDC on Base is
@@ -614,12 +639,13 @@ contract HollarBaseVault is MessageReceiver, AccessControlUpgradeable, IHollarBa
     ///      can reach. The consequence is recorded rather than hidden: a Base reorg landing after
     ///      a VAA is signed leaves that HOLLAR unbacked, bounded not by a slower consistency level
     ///      but by the deposit rate limit and the facilitator's bucket.
-    function _publish(uint8 kind, bytes32 recipient, uint256 amount) private returns (uint64 sequence) {
+    function _publish(uint8 kind, bytes32 recipient, uint256 amount, bytes32 origin) private returns (uint64 sequence) {
         uint256 fee = wormhole.messageFee();
         if (msg.value < fee) revert InsufficientMessageFee(msg.value, fee);
 
-        sequence =
-            wormhole.publishMessage{value: fee}(0, PsmPayload.encode(kind, recipient, amount), CONSISTENCY_INSTANT);
+        sequence = wormhole.publishMessage{value: fee}(
+            0, PsmPayload.encode(kind, recipient, amount, origin), CONSISTENCY_INSTANT
+        );
 
         if (msg.value > fee) {
             (bool ok,) = msg.sender.call{value: msg.value - fee}("");
