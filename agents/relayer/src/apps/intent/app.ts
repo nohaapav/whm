@@ -215,6 +215,9 @@ async function start(): Promise<void> {
     retries: RETRIES,
     backoff: { baseMs: RETRY_BASE_MS, maxMs: RETRY_MAX_MS },
     startingSequence: FROM_SEQUENCE,
+    // The instruction is found in the source transaction, so the hash is worth waiting for — a
+    // miss falls through to a retry, and the smallest of those is RETRY_BASE_MS.
+    sourceTx: true,
   });
 
   onEmitter(app, WORMHOLE.hydration, transceiver, handle as never);

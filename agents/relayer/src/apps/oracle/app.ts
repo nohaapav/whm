@@ -53,6 +53,7 @@ async function start(): Promise<void> {
     name: APP_NAME,
     retries: RETRIES,
     startingSequence: FROM_SEQUENCE,
+    sourceTx: true,
   });
 
   for (const route of ROUTES) {
