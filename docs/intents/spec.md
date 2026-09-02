@@ -13,15 +13,19 @@ just an address:
 placeOrder(assetIn, amountIn, minEthOut, depositAddress, maxRelayFee)
 ```
 
-**1Click.** The deposit address is minted by a quote, one per swap. It expires, the rate floor is
-frozen inside it, and getting one needs an HTTP call and a user to authorize the destination. Nothing
-beyond the shared transport is required. Implemented.
+**[Phase 1 — attended (1Click)](phase1.md).** The deposit address is minted by a quote, one per swap.
+It expires, the rate floor is frozen inside it, and getting one needs an HTTP call and a user to
+authorize the destination. Nothing beyond the shared transport is required. Deployed and running.
 
-**MPC-derived.** The deposit address is derived — `path → A → 0xN` — and is permanent, deterministic,
-and reusable for every fill. One user signature at schedule creation covers all of them; the rate
-floor is enforced per fill on NEAR instead of being frozen up front. Costs two extra pieces:
-`IntentQuoteEmitter` on Hydration and `IntentRouter` on NEAR. The Hydration side is implemented; the
-router is not built.
+**[Phase 2 — unattended (MPC-derived)](phase2.md).** The deposit address is derived — `path → A → 0xN`
+— and is permanent, deterministic, and reusable for every fill. One user signature at schedule
+creation covers all of them, and the rate floor is read from a Hydration price oracle per tranche
+rather than frozen up front, so no number in the flow comes from off-chain. Costs three extra pieces:
+`IntentDispatcher` and `IntentQuoteEmitter` on Hydration, and `IntentRouter` on NEAR. The emitters are
+written; the dispatcher and the router are not built.
+
+This document holds what the two share — the transport, the key derivation, and the rules that bind
+both. Each phase document covers its own end-to-end flow.
 
 Everything up to and including the Ethereum forward is **shared** — see
 [Shared transport](#shared-transport) below.
@@ -137,17 +141,22 @@ MPC derivation is what remains, and it removes the key from every human-operated
 Two independent paths leave Hydration: **funds go to Ethereum, the authorization
 message goes to NEAR.** They meet only inside the router.
 
+The end-to-end sequence, per phase, lives in [phase1.md](phase1.md) and [phase2.md](phase2.md). What
+follows is the shape both are built on.
+
 ```
-═══ PHASE 1 · dispatch ═══════════════════════════════════════════════════
+═══ dispatch ═════════════════════════════════════════════════════════════
 
  HYDRATION  (on-chain, autonomous — no off-chain dependency)
-   DCA tranche fires
+   DCA tranche fires → IntentDispatcher.dispatch(…)
      ├── IntentEmitter.placeOrder(…, 0xN, relayFee) ─►  VALUE PATH ┐
      │     sell for WETH, settle over NTT + publish the            │
      │     forwarding instruction (see Shared transport)           │
-     │                                                             │
-     └── IntentQuoteEmitter.publishQuote(Quote) ────► MESSAGE PATH ┼─┐
-           once per route, not per tranche                         │ │
+     │     → returns bridgeAmount ─┐                               │
+     │                             ▼                               │
+     └── IntentQuoteEmitter.publishQuote(terms, bridgeAmount) ─────┼─┐
+           reads the price oracle, writes minOutPerIn              │ │
+           once per tranche, priced in this transaction            │ │
                                                                    │ │
  ETHEREUM                                          ◄───────────────┘ │
    IntentReceiver.processOrder → forwards native ETH to 0xN          │
@@ -159,25 +168,26 @@ message goes to NEAR.** They meet only inside the router.
                                                                      │
  NEAR  (Wormhole core)                             ◄─────────────────┘
    guardians sign → VAA available to anyone
-   published once per order; the bot resubmits the same VAA every tranche
 
-═══ PHASE 2 · authorize & settle ═════════════════════════════════════════
+═══ authorize & settle ═══════════════════════════════════════════════════
 
- OFF-CHAIN BOT  (untrusted, holds no keys)
-   sees balance > 0 → quote → quote_hash ──────────────────┐
-                                                           ▼
- NEAR  IntentRouter.finalize(vaa, quote_hash, amount_out)
+ OFF-CHAIN BOT  (untrusted, holds no keys, supplies no numbers)
+   sees balance > 0, fetches the tranche's quote VAA ───────┐
+                                                            ▼
+ NEAR  IntentRouter.finalize(vaa)        ← one argument
    1. verify VAA + emitter (chain 73 + address)
-   2. recipient := vaa.payload          ← never a caller argument
-   3. require amount_out ≥ floor
-   4. v1.signer.sign(...)               [async, MPC]
-   5. emit signed MultiPayload ─────────────────────────────┐
+   2. recipient, amountIn, minOutPerIn := vaa.payload
+   3. require the quote is fresh; reject a replayed VAA
+   4. amount_in  := min(amountIn, balanceOf(A))   ← read, not passed
+      amount_out := amount_in × minOutPerIn / 1e18
+   5. v1.signer.sign(...)               [async, MPC]
+   6. emit signed MultiPayload ─────────────────────────────┐
                                                             ▼
  OFF-CHAIN BOT
-   publish_intent(quote_hashes, signed_data) ───────────────┐
+   publish_intent([], signed_data) ─────────────────────────┐
                                                             ▼
  NEAR  intents.near
-   relay pairs our intent with the solver's → settles → ft_withdraw
+   a solver fills the posted limit order → settles → ft_withdraw
                                                             │
  ZCASH                                                      ▼
    ZEC arrives at the recipient carried in the VAA
@@ -352,83 +362,50 @@ mistake deposit-side obscurity for a control.
 
 | #   | Component            | Chain         | Status                                                                                                                                                                    |
 | --- | -------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `IntentEmitter`      | Hydration EVM | **built** — `placeOrder`                                                                                                                                                  |
-| 2   | `IntentReceiver`     | Ethereum      | **built** — `processOrder`                                                                                                                                                |
-| 3   | `IntentQuoteEmitter` | Hydration EVM | **built** — `publishQuote`                                                                                                                                                |
-| 4   | Schedule storage     | Hydration     | to build — `0xN`, `maxRelayFee`, tranche params per schedule                                                                                                              |
-| 5   | `IntentRouter`       | NEAR (Rust)   | to build — VAA verification, floor enforcement, intent construction, MPC signing                                                                                          |
-| 6   | Relay bot            | off-chain     | to build — balance polling, solver quoting, `finalize`, `publish_intent`, status                                                                                          |
+| 1   | `IntentEmitter`      | Hydration EVM | **deployed** — `placeOrder`. Phase 2 adds `bridgeAmount` to its return value                                                                                              |
+| 2   | `IntentReceiver`     | Ethereum      | **deployed** — `processOrder`. Untouched by Phase 2                                                                                                                       |
+| 3   | `IntentQuoteEmitter` | Hydration EVM | written, never deployed — reads the price oracle and publishes the priced quote                                                                                            |
+| 4   | `IntentDispatcher`   | Hydration EVM | to build — stateless; composes 1 and 3 in one transaction                                                                                                                 |
+| 5   | `PythAdapter` + feeds | Ethereum     | to build — one adapter plus a `registerFeed` per asset, on the oracle rail already running                                                                                 |
+| 6   | `IntentRouter`       | NEAR (Rust)   | to build — VAA verification, floor read from the VAA, intent construction, MPC signing                                                                                     |
+| 7   | Relay bot            | off-chain     | to build — balance polling, `finalize`, `publish_intent`, status                                                                                                           |
 
-Components 1–2 are shared with the 1Click variant and already carry it. 3–6 are what the MPC variant
+Components 1–2 are shared and carry [Phase 1](phase1.md) today. 3–7 are what [Phase 2](phase2.md)
 adds. The bot is the only stateful off-chain piece and is untrusted by construction.
+
+**Schedule storage is not a component.** Hydration's DCA pallet already holds the asset, amount,
+interval and next-run time, so the dispatcher stores nothing.
 
 `IntentQuoteEmitter` is deployed separately from `IntentEmitter`, so its Wormhole emitter address is
 distinct. That address is what the NEAR router pins — see [schema.md](schema.md) §1.
 
 ---
 
-## 5. Sequence, per tranche
+## 5. Sequence
 
-1. DCA pallet fires.
-2. Scheduler calls `placeOrder(assetIn, amountIn, minEthOut, 0xN, maxRelayFee)` — sells for WETH,
-   settles over NTT, publishes the forwarding instruction. See
-   [Shared transport](#shared-transport).
-3. The quote itself was published once by `publishQuote(Quote)`, not per tranche; its VAA is
-   permanent public data that the bot resubmits every time.
-4. On Ethereum, `IntentReceiver.processOrder` delivers the settlement and forwards native ETH to
-   `0xN`, net of the relay fee.
-5. POA credits intents account `A` with `nep141:eth.omft.near`.
-6. Bot observes `A`'s balance > 0. Takes a per-account lock (one in-flight intent
-   per account — trivial, since each DCA maps to one account).
-7. Bot calls `quote` on the solver relay with `min_deadline_ms: 120000`.
-8. Bot calls `IntentRouter.finalize(vaa, quote_hash, amount_out)`. The router reads
-   A's balance itself; only the solver's quoted output is supplied.
-9. Router verifies the VAA, checks replay, enforces the floor, builds the intent,
-   calls `v1.signer.sign(...)`.
-10. On callback, router assembles the `MultiPayload` and emits it as a log
-    (and stores it for view access).
-11. Bot reads the signed payload and calls `publish_intent(quote_hashes, signed_data)`.
-12. Bot polls `get_status` until `SETTLED`. Releases the lock.
-
-**Failure at any of 7–12 leaves the balance untouched in `A`.** The next poll
-retries from step 6. Two tranches landing before a swap are swapped together.
-An expired quote is discarded and re-quoted at no cost — no funds move on an
-expired quote. The balance _is_ the state; individual deposits are never tracked.
-
-### Timing
-
-Only steps 9–11 sit inside the quote's validity window — the bridge latency is
-entirely before step 7. MPC signing is seconds. `min_deadline_ms: 120000` is
-generous; do **not** request long windows, since a quote valid for `T` is an
-option the solver writes and its price scales with `√T` (a 60-minute window costs
-roughly 7–8× the time premium of a 60-second one, when solvers answer at all).
+Per-swap for the attended variant, per-tranche for the unattended one — both end to end in
+[phase1.md](phase1.md) §1 and [phase2.md](phase2.md) §1.
 
 ---
 
-## 6. Known residual: price integrity
+## 6. Price integrity
 
-The VAA fixes _destination_ integrity. It does not fix _price_ integrity.
+The VAA fixes _destination_ integrity. On its own it does not fix _price_ integrity: whoever fills in
+`amount_out` sets the execution price, so if that number arrives from off-chain, a compromised bot
+colluding with a solver can accept a poor rate and take the spread.
 
-Hydration cannot compute a ZEC floor — it has no ZEC price — so `amount_out`
-originates from the bot's solver quote. A compromised bot cannot send funds
-elsewhere, but colluding with a solver it could accept a poor rate and extract
-value via the spread.
+[Phase 2](phase2.md) closes it by computing the floor on Hydration from a price oracle and publishing
+it inside the quote, so no price is a parameter anywhere — see [phase2.md](phase2.md) §3 and §5. The
+options that were weighed to get there, and why a live feed beats a committed rate, are in
+[price-integrity.md](price-integrity.md).
 
-Bounding options, in ascending strength:
+What remains is not integrity but **surrender of upside**: the intent is a posted limit order at the
+floor, so whatever the market would have paid above it goes to the solver. Recovering that needs price
+discovery rather than a reference — [dutch-auction.md](dutch-auction.md), which composes with the
+oracle rather than replacing it.
 
-1. **Sanity bounds only.** Router rejects absurd values (zero, overflow) and
-   relies on solver competition plus alerting. Cheapest; documented residual.
-2. **Rate floor in the VAA.** Hydration carries `maxSlippageBps` and a reference
-   rate. Works for fixed-term DCAs; for a rolling DCA the reference goes stale,
-   which is the same failure that killed pre-minting.
-3. **On-chain price reference on NEAR.** Router checks `amount_out` against an
-   oracle. Strongest, but Ref Finance has no meaningful ZEC depth (161 pools
-   touch `zec.omft.near`, all but one at zero TVL), so this needs a real oracle
-   feed and is its own project.
-
-**Recommendation:** ship with (1) plus monitoring, and record the residual
-explicitly. Do not describe the system as trustless without qualifying it: it is
-redirect-proof, not price-proof.
+Do not describe the system as trustless without qualifying which half: it is redirect-proof and
+price-floored, and the surplus is the filler's.
 
 ---
 
@@ -437,6 +414,15 @@ redirect-proof, not price-proof.
 What has been checked against a live system, and what is still an assumption, lives in
 [verification.md](verification.md) — grouped by status, blocking items first.
 
-Three are blocking and worth naming here: the exact bytes signed under `nep413` / `raw_ed25519`, that
-the router account id is registered and controlled by us, and that solvers quote ETH→ZEC at our
-tranche size at all. The last one can invalidate the whole design, so test it first.
+Three are blocking and worth naming here:
+
+- **A solver fills an unmatched intent.** With the price fixed on-chain there is no `quote_hash` to
+  bind to, so [Phase 2](phase2.md) posts a limit order to the book with `quote_hashes: []`. The array
+  is accepted; whether solvers take such an order is untested, and the whole flow rests on it.
+- **The exact bytes signed under `nep413` / `raw_ed25519`.** A wrong guess is a silent total failure.
+- **The router account id is registered and controlled by us.** Permanent, and every derived account
+  depends on it.
+
+That solvers price ETH→ZEC at all is settled: 1Click quotes it at production size to transparent
+addresses. Shielded `zs1`/`u1` destinations are rejected, so a Zcash route delivers to a public
+address.

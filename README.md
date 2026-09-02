@@ -20,9 +20,9 @@ Cross-chain infrastructure connecting EVM chains, Solana, Sui and Hydration via 
 │                                                                                 │
 │  ┌────────────────────────────────────────────────────────────────────────────┐ │
 │  │                          agents/  (off-chain)                              │ │
-│  │   broadcaster — Solana → Wormhole price/rate publisher                     │ │
-│  │   scan        — Basejump + Intents indexer                                 │ │
-│  │   relayer     — Wormhole VAA relayer (hydration-ntt, intent)               │ │
+│  │   broadcaster — Price/rate publisher                                       │ │
+│  │   scan        — Data indexer                                               │ │
+│  │   relayer     — VAA relayer (ntt, oracles, intent)                         │ │
 │  └────────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -106,7 +106,7 @@ See [migrations/README.md](migrations/README.md) for the migration model, naming
 | `@whm/contracts`     | `contracts/`          | Foundry project + per-package scripts      |
 | `@whm/crates-solana` | `crates/solana/`      | Anchor workspace + per-package scripts     |
 | `@whm/crates-near`   | `crates/near/`        | Near contracts + per-package scripts       |
-| `@whm/broadcaster`   | `agents/broadcaster/` | Wormhole price/rate publisher              |
-| `@whm/scan`          | `agents/scan/`        | Wormhole indexer (intent/basejump)         |
-| `@whm/relayer`       | `agents/relayer/`     | Wormhole VAA relayer (ntt, oracle, intent) |
-| `@whm/intent`        | `agents/intent/`      | Intents off-chain (relay-fee quoter, 1Click notifier) |
+| `@whm/broadcaster`   | `agents/broadcaster/` | Price/rate publisher                       |
+| `@whm/scan`          | `agents/scan/`        | Data indexer (intent/basejump)             |
+| `@whm/relayer`       | `agents/relayer/`     | VAA relayer (ntt, oracle, intent)          |
+| `@whm/intent`        | `agents/intent/`      | Intents off-chain (quoter, 1Click relayer) |
