@@ -16,7 +16,7 @@ import type { MigrationConfig } from "./types";
  *
  * Two things this migration deliberately does NOT do, because neither is ours to run:
  *
- *   - GhoToken.addFacilitator(vault, label, capacity). Substrate-side, executed by the technical
+ *   - GhoToken.addFacilitator(facilitator, label, capacity). Substrate-side, executed by the technical
  *     committee. Until it lands the facilitator has a zero bucket and mints nothing.
  *   - Unpausing. Both contracts ship paused. Redeem is unpaused first, then mint, once the bucket
  *     is granted and the invariant has been watched — a guardian action, after this migration.

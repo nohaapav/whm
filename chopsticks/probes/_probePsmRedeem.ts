@@ -93,12 +93,23 @@ function truncatedEvmAccount(h160: Hex): Hex {
   return `0x45544800${h160.slice(2)}${"00".repeat(8)}` as Hex;
 }
 
-/** The 66-byte PSM body: version | kind | recipient | amount. */
-function psmPayload(kind: number, recipient: Hex, amount: bigint): Hex {
+/** The 98-byte PSM body: version | kind | recipient | amount | origin. */
+function psmPayload(kind: number, recipient: Hex, amount: bigint, origin: Hex): Hex {
   return `0x01${kind.toString(16).padStart(2, "0")}${pad(recipient, { size: 32 }).slice(2)}${pad(
     `0x${amount.toString(16)}`,
     { size: 32 },
-  ).slice(2)}` as Hex;
+  ).slice(2)}${pad(origin, { size: 32 }).slice(2)}` as Hex;
+}
+
+/** Fail fast on an EVM revert: pallet_ethereum reports it as Ethereum.Executed.exit_reason. */
+async function assertSucceeded(net: Network, res: { blockHash: string }, label: string): Promise<void> {
+  const events = await getEventsAt(net, res.blockHash);
+  const executed = events
+    .map((e) => e.event as { type: string; value: { type: string; value?: { exit_reason?: unknown } } })
+    .find((e) => e.type === "Ethereum" && e.value.type === "Executed");
+  const reason = executed?.value.value?.exit_reason as { type?: string } | undefined;
+  if (!reason) throw new Error(`${label}: no Ethereum.Executed event in block`);
+  if (reason.type !== "Succeed") throw new Error(`${label}: EVM exit ${toJson(reason)}`);
 }
 
 /** What ForkWormhole decodes: abi.encode(emitterChainId, emitterAddress, payload). */
@@ -240,15 +251,16 @@ async function main(): Promise<void> {
     });
     console.log(`   bucket granted: capacity ${fmt(cap, 18)} HOLLAR, level ${fmt(lvl0, 18)}`);
 
-    // 5 ── mint leg (also gives us HOLLAR to redeem)
-    await client.call(
+    // 5 ── mint leg (also gives us HOLLAR to redeem). Origin is the Base depositor; any H160 does.
+    const mintRes = await client.call(
       facilitator,
       encodeFunctionData({
         abi: facilitatorAbi,
         functionName: "receiveMessage",
-        args: [vaa(BASE_CHAIN, VAULT_EMITTER, psmPayload(1, me, MINT_USDC))],
+        args: [vaa(BASE_CHAIN, VAULT_EMITTER, psmPayload(1, me, MINT_USDC, me))],
       }),
     );
+    await assertSucceeded(net, mintRes, "receiveMessage (mint)");
     const minted = await eth.readContract({
       address: HOLLAR,
       abi: hollarAbi,
@@ -272,6 +284,7 @@ async function main(): Promise<void> {
         args: [REDEEM_USDC, me],
       }),
     );
+    await assertSucceeded(net, res, "redeem");
 
     const after = await eth.readContract({
       address: HOLLAR,
@@ -317,8 +330,8 @@ async function main(): Promise<void> {
     }
 
     // Decode the event properly rather than slicing off the tail: `payload` is a dynamic `bytes`,
-    // so ABI pads it from 66 to 96 and appends `consistencyLevel` after the offset word. Taking the
-    // last 66 bytes therefore starts 30 bytes into the body and reads the recipient as the kind.
+    // so ABI pads it from 98 to 128 and appends `consistencyLevel` after the offset word. Slicing
+    // the last 98 bytes would therefore start inside the body and misread every field.
     const [, , payload, consistency] = decodeAbiParameters(
       [{ type: "uint64" }, { type: "uint32" }, { type: "bytes" }, { type: "uint8" }],
       toHex(published.data),
@@ -326,15 +339,20 @@ async function main(): Promise<void> {
     const body = payload as Hex;
     const kind = parseInt(body.slice(4, 6), 16);
     const bytes = (body.length - 2) / 2;
+    const origin = getAddress(`0x${body.slice(2 + 66 * 2 + 24)}`);
     console.log(`   consistency ${consistency} (200 = publish immediately)`);
-    console.log(`   published: kind ${kind} (2 = redeem), ${bytes} bytes`);
-    console.log(`   ${kind === 2 && bytes === 66 ? "✅ outbound wire format correct" : "❌ wire mismatch"}`);
+    console.log(`   published: kind ${kind} (2 = redeem), ${bytes} bytes, origin ${origin}`);
+    const wireOk = kind === 2 && bytes === 98 && origin === me;
+    console.log(`   ${wireOk ? "✅ outbound wire format correct" : "❌ wire mismatch"}`);
+    if (!wireOk) process.exitCode = 1;
   } finally {
     await teardownForks(nets);
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(process.exitCode ?? 0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
