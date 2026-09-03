@@ -2,7 +2,7 @@ import type { MigrationStep } from "./types";
 import { setFees } from "../../actions/psm/setVaultConfig";
 
 const step: MigrationStep = {
-  name: "006-set-fees@vault",
+  name: "002-set-fees@vault",
   description: "Set redeem fee and surplus floor on the vault",
   action: async (ctx) => {
     const required = (k: string) => {
@@ -10,7 +10,7 @@ const step: MigrationStep = {
       return ctx.env[k] as string;
     };
 
-    const vault = ctx.outputs["002-deploy-vault"].proxyAddress;
+    const vault = ctx.outputs["001-deploy-vault"].proxyAddress;
 
     return await setFees({
       ...ctx.wallet.base,

@@ -2,7 +2,7 @@ import type { MigrationStep } from "./types";
 import { setLimits } from "../../actions/psm/setFacilitatorConfig";
 
 const step: MigrationStep = {
-  name: "005-set-limits@facilitator",
+  name: "007-set-limits@facilitator",
   description: "Set inbound (mint) and outbound (redeem) rate limits on the facilitator",
   action: async (ctx) => {
     const required = (k: string) => {
@@ -10,7 +10,7 @@ const step: MigrationStep = {
       return ctx.env[k] as string;
     };
 
-    const facilitator = ctx.outputs["001-deploy-facilitator"].proxyAddress;
+    const facilitator = ctx.outputs["004-deploy-facilitator"].proxyAddress;
 
     return await setLimits({
       ...ctx.wallet.hydration,

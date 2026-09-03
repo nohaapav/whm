@@ -2,7 +2,7 @@ import type { MigrationStep } from "./types";
 import { deployVault } from "../../actions/psm/deployVault";
 
 const step: MigrationStep = {
-  name: "002-deploy-vault",
+  name: "001-deploy-vault",
   description: "Deploy HollarBaseVault UUPS proxy on Base (deposits paused, oracle gate set)",
   action: async (ctx) => {
     const required = (k: string) => {

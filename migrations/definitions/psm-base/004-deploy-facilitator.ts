@@ -2,7 +2,7 @@ import type { MigrationStep } from "./types";
 import { deployFacilitator } from "../../actions/psm/deployFacilitator";
 
 const step: MigrationStep = {
-  name: "001-deploy-facilitator",
+  name: "004-deploy-facilitator",
   description: "Deploy HollarBaseFacilitator UUPS proxy on Hydration (ships paused)",
   action: async (ctx) => {
     const required = (k: string) => {
@@ -16,7 +16,7 @@ const step: MigrationStep = {
       hollar: required("HOLLAR_HYDRATION") as `0x${string}`,
       usdcDecimals: Number(required("USDC_DECIMALS")),
       baseChainId: Number(required("WORMHOLE_ID_BASE")),
-      // Admin is the deployer for now; steps 003 and 005 need it, and 010 hands it over.
+      // Admin is the deployer for now; steps 005 and 007 need it, and 009 hands it over.
       admin: ctx.wallet.hydration.account.address,
       guardian: required("FACILITATOR_GUARDIAN") as `0x${string}`,
     });

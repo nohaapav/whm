@@ -13,6 +13,11 @@ set -euo pipefail
 #
 # Arguments:
 #   <env>   Environment context: prod | fork
+#   ...     Any further flags go straight to the runner (--from, --pause-at).
+#
+#           --pause-at runs that step and stops after it, so to keep the deployer's
+#           admin role for post-checks, pause at 007-set-limits@facilitator — the last
+#           step before either handover.
 #
 # Required env vars (set in shell or root .env):
 #   PK_FACILITATOR  Hydration deployer (0x...)
@@ -21,7 +26,8 @@ set -euo pipefail
 # Example:
 #   PK=0x... PK_FACILITATOR=0x... ./sh/migrate-psm-base.sh prod
 
-ENV=${1:?Usage: migrate-psm-base.sh <env (prod|fork)>}
+ENV=${1:?Usage: migrate-psm-base.sh <env (prod|fork)> [runner flags...]}
+shift
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TSX="$ROOT_DIR/node_modules/.bin/tsx"
@@ -44,4 +50,4 @@ PK=${PK:?Missing PK}
 
 export PK_FACILITATOR PK
 
-"$TSX" "$RUNNER" --migration psm-base --env "$ENV"
+"$TSX" "$RUNNER" --migration psm-base --env "$ENV" "$@"

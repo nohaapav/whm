@@ -2,7 +2,7 @@ import type { MigrationStep } from "./types";
 import { setDepositLimit } from "../../actions/psm/setVaultConfig";
 
 const step: MigrationStep = {
-  name: "007-set-deposit-limit@vault",
+  name: "003-set-deposit-limit@vault",
   description: "Set the deposit rate limit (unset means closed, never unlimited)",
   action: async (ctx) => {
     const required = (k: string) => {
@@ -10,7 +10,7 @@ const step: MigrationStep = {
       return ctx.env[k] as string;
     };
 
-    const vault = ctx.outputs["002-deploy-vault"].proxyAddress;
+    const vault = ctx.outputs["001-deploy-vault"].proxyAddress;
 
     return await setDepositLimit({
       ...ctx.wallet.base,

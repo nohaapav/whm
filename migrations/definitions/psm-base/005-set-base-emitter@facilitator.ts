@@ -4,11 +4,11 @@ import type { MigrationStep } from "./types";
 import { setEmitter } from "../../actions/psm/setEmitter";
 
 const step: MigrationStep = {
-  name: "003-set-base-emitter@facilitator",
+  name: "005-set-base-emitter@facilitator",
   description: "Bind the Base vault as the facilitator's only authorized emitter (one-shot)",
   action: async (ctx) => {
-    const facilitator = ctx.outputs["001-deploy-facilitator"].proxyAddress;
-    const vault = ctx.outputs["002-deploy-vault"].proxyAddress;
+    const facilitator = ctx.outputs["004-deploy-facilitator"].proxyAddress;
+    const vault = ctx.outputs["001-deploy-vault"].proxyAddress;
 
     return await setEmitter({
       ...ctx.wallet.hydration,
